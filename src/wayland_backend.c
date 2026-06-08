@@ -162,7 +162,7 @@ static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t s
             char buf[32];
             int len = xkb_state_key_get_utf8(xkb_state, key + 8, buf, sizeof(buf));
             if (len > 0) {
-                term_send_input(buf, len - 1);
+                term_send_input(buf, len);
             }
         }
     }
