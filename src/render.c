@@ -97,6 +97,17 @@ int render_init(const char *font_pattern) {
 void render_draw(VTState *state) {
     if (!g_framebuffer) return;
 
+    static uint32_t *shadow_buffer = NULL;
+    static int shadow_w = 0, shadow_h = 0;
+    if (shadow_w != g_width || shadow_h != g_height || !shadow_buffer) {
+        if (shadow_buffer) my_free(shadow_buffer);
+        shadow_buffer = my_malloc(g_width * g_height * 4);
+        shadow_w = g_width;
+        shadow_h = g_height;
+    }
+    uint32_t *real_fb = g_framebuffer;
+    uint32_t *g_framebuffer = shadow_buffer;
+
     uint32_t alpha = (uint32_t)(g_config.opacity * 255.0f);
     if (alpha > 255) alpha = 255;
     uint32_t bg_r = (g_config.bg_color >> 16) & 0xFF;
@@ -248,4 +259,6 @@ void render_draw(VTState *state) {
             }
         }
     }
+    
+    memcpy(real_fb, shadow_buffer, g_width * g_height * 4);
 }

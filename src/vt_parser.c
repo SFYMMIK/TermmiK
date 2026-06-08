@@ -282,6 +282,16 @@ static void handle_csi(VTState *state, char c) {
             }
             state->cursor_x = 0;
             state->cursor_y = 0;
+        } else if (mode == 3) {
+            for (int i = 0; i < MAX_SCROLLBACK; i++) {
+                if (state->scrollback[i].cells) {
+                    my_free(state->scrollback[i].cells);
+                    state->scrollback[i].cells = NULL;
+                }
+            }
+            state->scrollback_count = 0;
+            state->scrollback_head = 0;
+            state->scroll_offset = 0;
         }
     } else if (c == 'G' || c == '`') {
         int col = (state->num_params > 0 && state->params[0] > 0) ? state->params[0] : 1;
