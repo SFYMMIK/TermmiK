@@ -160,7 +160,7 @@ static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t s
         else if (sym == XKB_KEY_Left) term_send_input("\033[D", 3);
         else {
             char buf[32];
-            int len = xkb_keysym_to_utf8(sym, buf, sizeof(buf));
+            int len = xkb_state_key_get_utf8(xkb_state, key + 8, buf, sizeof(buf));
             if (len > 0) {
                 term_send_input(buf, len - 1);
             }

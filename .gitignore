@@ -1,0 +1,11 @@
+# Build directories and files
+build/
+*.o
+
+# Executables
+TermmiK
+
+# Temporary and swap files
+*.swp
+*~
+.DS_Store
