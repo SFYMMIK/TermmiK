@@ -9,6 +9,8 @@ Written purely in C, TermmiK leverages zero-bloat graphics protocols and avoids 
 - **Extreme Memory Efficiency**: Bypasses heavy UI rendering libraries (like Pango, Cairo, or GTK) in favor of raw framebuffer manipulation.
 - **Microscopic Binary**: Compiled with Link-Time Optimization (LTO) and aggressive space-saving flags, resulting in a tiny executable.
 - **Native Wayland & X11 Support**: Supports both major Linux display protocols natively without translation layers.
+- **Native Clipboard & Selection**: Fully integrated, bloat-free Wayland (`wl_data_device`) and X11 clipboard sharing. Highlight text with your mouse and use `Ctrl+Shift+C` / `Ctrl+Shift+V` without relying on external tools like `xclip` or `wl-clipboard`.
+- **Flawless Keyboard Polling**: Hardware-level keyboard repeating optimized out of the critical Wayland event loop using asynchronous `timerfd` interrupts.
 - **Hardware-Accelerated Transparency**: Supports perfectly smooth, per-pixel alpha blending for terminal backgrounds on both Wayland and X11 without fading the text.
 - **Customizable**: Tweak fonts, padding, colors, opacity, and cursor styles through a simple configuration without recompiling.
 - **Gamma-Corrected Subpixel Emulation**: Achieves bold, crisp text rendering comparable to Freetype, but without the massive memory overhead, via mathematically optimized `stb_truetype` alpha blending.

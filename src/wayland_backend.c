@@ -24,6 +24,7 @@
 #include "xdg-decoration-client-protocol.h"
 
 #include <sys/mman.h>
+#include <sys/timerfd.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
@@ -53,6 +54,95 @@ static int pool_size = 0;
 static struct xkb_context *xkb_context = NULL;
 static struct xkb_keymap *xkb_keymap = NULL;
 static struct xkb_state *xkb_state = NULL;
+
+static struct wl_data_device_manager *wl_data_device_manager = NULL;
+static struct wl_data_device *wl_data_device = NULL;
+static struct wl_data_offer *current_data_offer = NULL;
+static char *clipboard_text = NULL;
+static uint32_t current_serial = 0;
+
+static int key_repeat_fd = -1;
+static int key_repeat_rate = 25;
+static int key_repeat_delay = 300;
+static char key_repeat_str[32];
+static int key_repeat_len = 0;
+
+static void data_offer_offer(void *data, struct wl_data_offer *offer, const char *mime_type) {}
+static void data_offer_source_actions(void *data, struct wl_data_offer *offer, uint32_t source_actions) {}
+static void data_offer_action(void *data, struct wl_data_offer *offer, uint32_t dnd_action) {}
+static const struct wl_data_offer_listener data_offer_listener = { .offer = data_offer_offer, .source_actions = data_offer_source_actions, .action = data_offer_action };
+
+static void data_device_data_offer(void *data, struct wl_data_device *device, struct wl_data_offer *offer) {
+    wl_data_offer_add_listener(offer, &data_offer_listener, NULL);
+}
+static void data_device_enter(void *data, struct wl_data_device *device, uint32_t serial, struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y, struct wl_data_offer *id) {}
+static void data_device_leave(void *data, struct wl_data_device *device) {}
+static void data_device_motion(void *data, struct wl_data_device *device, uint32_t time, wl_fixed_t x, wl_fixed_t y) {}
+static void data_device_drop(void *data, struct wl_data_device *device) {}
+static void data_device_selection(void *data, struct wl_data_device *device, struct wl_data_offer *offer) {
+    if (current_data_offer && current_data_offer != offer) {
+        wl_data_offer_destroy(current_data_offer);
+    }
+    current_data_offer = offer;
+}
+static const struct wl_data_device_listener data_device_listener = {
+    .data_offer = data_device_data_offer,
+    .enter = data_device_enter, .leave = data_device_leave, .motion = data_device_motion, .drop = data_device_drop,
+    .selection = data_device_selection
+};
+
+static void data_source_target(void *data, struct wl_data_source *source, const char *mime_type) {}
+static void data_source_send(void *data, struct wl_data_source *source, const char *mime_type, int32_t fd) {
+    if (clipboard_text) {
+        write(fd, clipboard_text, strlen(clipboard_text));
+    }
+    close(fd);
+}
+static void data_source_cancelled(void *data, struct wl_data_source *source) { wl_data_source_destroy(source); }
+static void data_source_dnd_drop_performed(void *data, struct wl_data_source *source) {}
+static void data_source_dnd_finished(void *data, struct wl_data_source *source) {}
+static void data_source_action(void *data, struct wl_data_source *source, uint32_t dnd_action) {}
+static const struct wl_data_source_listener data_source_listener = {
+    .target = data_source_target, .send = data_source_send, .cancelled = data_source_cancelled,
+    .dnd_drop_performed = data_source_dnd_drop_performed, .dnd_finished = data_source_dnd_finished, .action = data_source_action
+};
+
+static void wayland_set_clipboard(const char *text) {
+    if (clipboard_text) free(clipboard_text);
+    clipboard_text = strdup(text);
+    if (!wl_data_device_manager || !wl_data_device) return;
+    struct wl_data_source *source = wl_data_device_manager_create_data_source(wl_data_device_manager);
+    wl_data_source_add_listener(source, &data_source_listener, NULL);
+    wl_data_source_offer(source, "text/plain;charset=utf-8");
+    wl_data_source_offer(source, "text/plain");
+    wl_data_source_offer(source, "UTF8_STRING");
+    wl_data_device_set_selection(wl_data_device, source, current_serial);
+}
+
+static void wayland_get_clipboard(void) {
+    if (!current_data_offer) return;
+    int fds[2];
+    if (pipe(fds) < 0) return;
+    wl_data_offer_receive(current_data_offer, "text/plain;charset=utf-8", fds[1]);
+    close(fds[1]);
+    wl_display_flush(wl_display);
+    
+    char *buf = malloc(1024 * 1024);
+    if (!buf) return;
+    int total = 0;
+    while (total < 1024 * 1024 - 1) {
+        int n = read(fds[0], buf + total, 1024 * 1024 - 1 - total);
+        if (n <= 0) break;
+        total += n;
+    }
+    close(fds[0]);
+    if (total > 0) {
+        buf[total] = 0;
+        term_send_input(buf, total);
+    }
+    free(buf);
+}
+
 
 static int create_shm_file(int size) {
     int fd = memfd_create("termmiK-wayland-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -152,25 +242,65 @@ static void keyboard_keymap(void *data, struct wl_keyboard *wl_keyboard, uint32_
 static void keyboard_enter(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys) {}
 static void keyboard_leave(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, struct wl_surface *surface) {}
 static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state) {
+    current_serial = serial;
     if (state == WL_KEYBOARD_KEY_STATE_PRESSED && xkb_state) {
         xkb_keysym_t sym = xkb_state_key_get_one_sym(xkb_state, key + 8);
-        if (sym == XKB_KEY_Up) term_send_input("\033[A", 3);
-        else if (sym == XKB_KEY_Down) term_send_input("\033[B", 3);
-        else if (sym == XKB_KEY_Right) term_send_input("\033[C", 3);
-        else if (sym == XKB_KEY_Left) term_send_input("\033[D", 3);
+        char buf[32];
+        int len = 0;
+
+        if (sym == XKB_KEY_Up) { strcpy(buf, "\033[A"); len = 3; }
+        else if (sym == XKB_KEY_Down) { strcpy(buf, "\033[B"); len = 3; }
+        else if (sym == XKB_KEY_Right) { strcpy(buf, "\033[C"); len = 3; }
+        else if (sym == XKB_KEY_Left) { strcpy(buf, "\033[D"); len = 3; }
         else {
-            char buf[32];
-            int len = xkb_state_key_get_utf8(xkb_state, key + 8, buf, sizeof(buf));
-            if (len > 0) {
-                term_send_input(buf, len);
+            len = xkb_state_key_get_utf8(xkb_state, key + 8, buf, sizeof(buf));
+            
+            if (sym == XKB_KEY_C || sym == XKB_KEY_c) {
+                if (xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) &&
+                    xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE)) {
+                    extern void term_copy(void);
+                    term_copy();
+                    return;
+                }
+            } else if (sym == XKB_KEY_V || sym == XKB_KEY_v) {
+                if (xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) &&
+                    xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE)) {
+                    wayland_get_clipboard();
+                    return;
+                }
             }
+        }
+        
+        if (len > 0) {
+            term_send_input(buf, len);
+            if (key_repeat_fd >= 0 && key_repeat_rate > 0) {
+                memcpy(key_repeat_str, buf, len);
+                key_repeat_len = len;
+                struct itimerspec ts = {0};
+                ts.it_value.tv_sec = key_repeat_delay / 1000;
+                ts.it_value.tv_nsec = (key_repeat_delay % 1000) * 1000000;
+                if (ts.it_value.tv_sec == 0 && ts.it_value.tv_nsec == 0) {
+                    ts.it_value.tv_nsec = 1;
+                }
+                ts.it_interval.tv_sec = 0;
+                ts.it_interval.tv_nsec = 1000000000 / key_repeat_rate;
+                timerfd_settime(key_repeat_fd, 0, &ts, NULL);
+            }
+        }
+    } else if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+        if (key_repeat_fd >= 0) {
+            struct itimerspec ts = {0};
+            timerfd_settime(key_repeat_fd, 0, &ts, NULL);
         }
     }
 }
 static void keyboard_modifiers(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group) {
     if (xkb_state) xkb_state_update_mask(xkb_state, mods_depressed, mods_latched, mods_locked, 0, 0, group);
 }
-static void keyboard_repeat_info(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay) {}
+static void keyboard_repeat_info(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay) {
+    key_repeat_rate = rate;
+    key_repeat_delay = delay;
+}
 
 static const struct wl_keyboard_listener keyboard_listener = {
     .keymap = keyboard_keymap,
@@ -183,8 +313,31 @@ static const struct wl_keyboard_listener keyboard_listener = {
 
 static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface, wl_fixed_t surface_x, wl_fixed_t surface_y) {}
 static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface) {}
-static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y) {}
-static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {}
+
+
+static wl_fixed_t last_ptr_x = 0;
+static wl_fixed_t last_ptr_y = 0;
+static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
+    current_serial = serial;
+    if (button == 272) { // Left click
+        extern void term_mouse_down(int x, int y);
+        extern void term_mouse_up(int x, int y);
+        if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+            term_mouse_down(wl_fixed_to_int(last_ptr_x), wl_fixed_to_int(last_ptr_y));
+        } else {
+            term_mouse_up(wl_fixed_to_int(last_ptr_x), wl_fixed_to_int(last_ptr_y));
+            extern void term_copy(void);
+            term_copy();
+        }
+    }
+}
+static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y) {
+    last_ptr_x = surface_x;
+    last_ptr_y = surface_y;
+    extern void term_mouse_motion(int x, int y);
+    term_mouse_motion(wl_fixed_to_int(last_ptr_x), wl_fixed_to_int(last_ptr_y));
+}
+
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis, wl_fixed_t value) {
     if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
         int v = wl_fixed_to_int(value);
@@ -245,6 +398,8 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         xdg_wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
         xdg_wm_base_add_listener(xdg_wm_base, &xdg_wm_base_listener, NULL);
+    } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+        wl_data_device_manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, 3);
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
         wl_seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
         wl_seat_add_listener(wl_seat, &seat_listener, NULL);
@@ -289,6 +444,14 @@ static int wayland_init(const char *font_pattern) {
         zxdg_toplevel_decoration_v1_set_mode(decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
     }
 
+    if (wl_data_device_manager && wl_seat) {
+        wl_data_device = wl_data_device_manager_get_data_device(wl_data_device_manager, wl_seat);
+        wl_data_device_add_listener(wl_data_device, &data_device_listener, NULL);
+    }
+    
+    key_repeat_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+
+
     wl_surface_commit(wl_surface);
     wl_display_roundtrip(wl_display); // Wait for configure
 
@@ -319,6 +482,17 @@ static int wayland_poll_events(void) {
     return 0;
 }
 
+static void wayland_handle_timer(void) {
+    if (key_repeat_fd >= 0) {
+        uint64_t expirations;
+        if (read(key_repeat_fd, &expirations, sizeof(expirations)) == sizeof(expirations)) {
+            for (uint64_t i = 0; i < expirations; i++) {
+                term_send_input(key_repeat_str, key_repeat_len);
+            }
+        }
+    }
+}
+
 static int wayland_get_fd(void) {
     return wl_display_get_fd(wl_display);
 }
@@ -331,12 +505,18 @@ static void wayland_flush(void) {
     wl_display_flush(wl_display);
 }
 
+static int wayland_get_timer_fd(void) { return key_repeat_fd; }
+
 static WindowBackend _wayland_backend = {
     .init = wayland_init,
     .cleanup = wayland_cleanup,
     .poll_events = wayland_poll_events,
     .get_fd = wayland_get_fd,
-    .flush = wayland_flush
+    .flush = wayland_flush,
+    .get_timer_fd = wayland_get_timer_fd,
+    .set_clipboard = wayland_set_clipboard,
+    .get_clipboard = wayland_get_clipboard,
+    .handle_timer = wayland_handle_timer
 };
 
 WindowBackend* get_wayland_backend(void) {

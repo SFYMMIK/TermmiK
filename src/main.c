@@ -38,6 +38,15 @@ static VTState vt_state;
 static int needs_render = 1;
 WindowBackend *g_backend = NULL;
 
+int g_select_active = 0;
+int g_select_dragging = 0;
+int g_select_start_row = 0;
+int g_select_start_col = 0;
+int g_select_end_row = 0;
+int g_select_end_col = 0;
+
+void term_copy(void);
+
 void term_resize(int width, int height) {
     int new_cols = (width - 2 * g_config.padding_x) / 9;
     if (new_cols < 1) new_cols = 1;
@@ -55,6 +64,86 @@ void term_send_input(const char *buf, int len) {
     if (len > 0) {
         pty_write(g_pty_fd, buf, len);
     }
+}
+
+void term_mouse_down(int x, int y) {
+    g_select_active = 0;
+    g_select_dragging = 1;
+    int col = (x - g_config.padding_x) / 9;
+    int row = (y - g_config.padding_y) / 18;
+    g_select_start_col = col;
+    g_select_start_row = row - vt_state.scroll_offset;
+    g_select_end_col = col;
+    g_select_end_row = g_select_start_row;
+    needs_render = 1;
+}
+
+void term_mouse_motion(int x, int y) {
+    if (g_select_dragging) {
+        g_select_active = 1;
+        int col = (x - g_config.padding_x) / 9;
+        int row = (y - g_config.padding_y) / 18;
+        if (col < 0) col = 0;
+        if (col >= vt_state.cols) col = vt_state.cols - 1;
+        g_select_end_col = col;
+        g_select_end_row = row - vt_state.scroll_offset;
+        needs_render = 1;
+    }
+}
+
+void term_mouse_up(int x, int y) {
+    g_select_dragging = 0;
+    (void)x; (void)y;
+}
+
+void term_copy(void) {
+    if (!g_select_active || !g_backend->set_clipboard) return;
+
+    int r1 = g_select_start_row, c1 = g_select_start_col;
+    int r2 = g_select_end_row, c2 = g_select_end_col;
+
+    if (r1 > r2 || (r1 == r2 && c1 > c2)) {
+        int tr = r1; r1 = r2; r2 = tr;
+        int tc = c1; c1 = c2; c2 = tc;
+    }
+
+    char *buf = malloc(1024 * 1024);
+    if (!buf) return;
+    int idx = 0;
+
+    for (int r = r1; r <= r2; r++) {
+        int start_c = (r == r1) ? c1 : 0;
+        int end_c = (r == r2) ? c2 : vt_state.cols - 1;
+
+        Cell *row_cells = NULL;
+        if (r < 0) {
+            int max_sb = g_config.scrollback_lines;
+            if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
+            if (max_sb <= 0) max_sb = 1;
+
+            int back = -r;
+            if (back <= vt_state.scrollback_count) {
+                int real_idx = (vt_state.scrollback_head - back + max_sb) % max_sb;
+                row_cells = vt_state.scrollback[real_idx].cells;
+            }
+        } else if (r < vt_state.rows) {
+            row_cells = &vt_state.cells[r * vt_state.cols];
+        }
+
+        if (row_cells) {
+            for (int c = start_c; c <= end_c; c++) {
+                uint32_t code = row_cells[c].char_code;
+                if (!code) code = ' ';
+                if (code < 128) {
+                    buf[idx++] = (char)code;
+                }
+            }
+        }
+        if (r != r2) buf[idx++] = '\n';
+    }
+    buf[idx] = '\0';
+    g_backend->set_clipboard(buf);
+    free(buf);
 }
 
 void term_scroll(int offset) {
@@ -107,22 +196,33 @@ int main(int argc, char **argv) {
     }
     vt_state.pty_fd = g_pty_fd;
 
-    struct pollfd fds[2];
+    struct pollfd fds[3];
+    int nfds = 2;
     fds[0].fd = g_pty_fd;
     fds[0].events = POLLIN;
     fds[1].fd = g_backend->get_fd();
     fds[1].events = POLLIN;
 
+    int timer_fd = g_backend->get_timer_fd ? g_backend->get_timer_fd() : -1;
+    if (timer_fd >= 0) {
+        fds[2].fd = timer_fd;
+        fds[2].events = POLLIN;
+        nfds = 3;
+    }
+
     char buf[4096];
 
     while (1) {
-        if (poll(fds, 2, -1) < 0) {
+        if (poll(fds, nfds, -1) < 0) {
             if (errno == EINTR) continue;
             break;
         }
 
         if (fds[1].revents & POLLIN) {
             if (g_backend->poll_events() < 0) break;
+        }
+        if (nfds == 3 && (fds[2].revents & POLLIN)) {
+            if (g_backend->handle_timer) g_backend->handle_timer();
         }
 
         if (fds[0].revents & POLLIN) {

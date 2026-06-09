@@ -94,6 +94,12 @@ int render_init(const char *font_pattern) {
     return 0;
 }
 
+extern int g_select_active;
+extern int g_select_start_row;
+extern int g_select_start_col;
+extern int g_select_end_row;
+extern int g_select_end_col;
+
 void render_draw(VTState *state) {
     if (!g_framebuffer) return;
 
@@ -150,6 +156,26 @@ void render_draw(VTState *state) {
             
             uint32_t bg = c.bg_color;
             uint32_t fg = c.fg_color;
+
+            int is_selected = 0;
+            if (g_select_active) {
+                int r1 = g_select_start_row, c1 = g_select_start_col;
+                int r2 = g_select_end_row, c2 = g_select_end_col;
+                if (r1 > r2 || (r1 == r2 && c1 > c2)) {
+                    int tr = r1; r1 = r2; r2 = tr;
+                    int tc = c1; c1 = c2; c2 = tc;
+                }
+                if (logical_y > r1 && logical_y < r2) is_selected = 1;
+                else if (logical_y == r1 && logical_y == r2) {
+                    if (x >= c1 && x <= c2) is_selected = 1;
+                } else if (logical_y == r1 && x >= c1) is_selected = 1;
+                else if (logical_y == r2 && x <= c2) is_selected = 1;
+            }
+
+            if (is_selected) {
+                bg = c.fg_color;
+                fg = c.bg_color;
+            }
             
             int is_cursor = (logical_y == state->cursor_y && x == state->cursor_x);
             if (is_cursor && g_config.cursor_shape == 0) {

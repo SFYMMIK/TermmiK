@@ -38,6 +38,23 @@ static int g_shm_supported = 0;
 static Visual *g_visual;
 static int g_depth;
 
+static char *x11_clipboard_text = NULL;
+static Atom atom_CLIPBOARD, atom_UTF8_STRING, atom_TARGETS;
+
+static void x11_set_clipboard(const char *text) {
+    if (x11_clipboard_text) free(x11_clipboard_text);
+    x11_clipboard_text = strdup(text);
+    XSetSelectionOwner(g_dpy, atom_CLIPBOARD, g_win, CurrentTime);
+}
+
+static void x11_get_clipboard(void) {
+    XConvertSelection(g_dpy, atom_CLIPBOARD, atom_UTF8_STRING, atom_CLIPBOARD, g_win, CurrentTime);
+}
+
+static int x11_get_timer_fd(void) {
+    return -1; // X11 does key repeats automatically
+}
+
 static int x11_init(const char *font_pattern) {
     (void)font_pattern; // Fonts are handled by render.c
     g_dpy = XOpenDisplay(NULL);
@@ -67,6 +84,10 @@ static int x11_init(const char *font_pattern) {
     g_win = XCreateWindow(g_dpy, root, 0, 0, g_width, g_height, 0,
                           g_depth, InputOutput, g_visual,
                           CWColormap | CWBorderPixel | CWBackPixel | CWEventMask, &attr);
+
+    atom_CLIPBOARD = XInternAtom(g_dpy, "CLIPBOARD", False);
+    atom_UTF8_STRING = XInternAtom(g_dpy, "UTF8_STRING", False);
+    atom_TARGETS = XInternAtom(g_dpy, "TARGETS", False);
 
     XClassHint *class_hint = XAllocClassHint();
     if (class_hint) {
@@ -132,6 +153,18 @@ static int x11_poll_events(void) {
             KeySym keysym;
             char chars[32];
             int len = XLookupString(&ev.xkey, chars, sizeof(chars), &keysym, NULL);
+            
+            if ((ev.xkey.state & ControlMask) && (ev.xkey.state & ShiftMask)) {
+                if (keysym == XK_C || keysym == XK_c) {
+                    extern void term_copy(void);
+                    term_copy();
+                    continue;
+                } else if (keysym == XK_V || keysym == XK_v) {
+                    x11_get_clipboard();
+                    continue;
+                }
+            }
+
             if (len > 0) {
                 term_send_input(chars, len);
             }
@@ -171,6 +204,59 @@ static int x11_poll_events(void) {
                 term_scroll(3);
             } else if (ev.xbutton.button == 5) { // Scroll down
                 term_scroll(-3);
+            } else if (ev.xbutton.button == 1) { // Left click
+                extern void term_mouse_down(int x, int y);
+                term_mouse_down(ev.xbutton.x, ev.xbutton.y);
+            }
+        } else if (ev.type == ButtonRelease) {
+            if (ev.xbutton.button == 1) {
+                extern void term_mouse_up(int x, int y);
+                extern void term_copy(void);
+                term_mouse_up(ev.xbutton.x, ev.xbutton.y);
+                term_copy();
+            }
+        } else if (ev.type == MotionNotify) {
+            if (ev.xmotion.state & Button1Mask) {
+                extern void term_mouse_motion(int x, int y);
+                term_mouse_motion(ev.xmotion.x, ev.xmotion.y);
+            }
+        } else if (ev.type == SelectionRequest) {
+            XSelectionRequestEvent *req = &ev.xselectionrequest;
+            XSelectionEvent res = {0};
+            res.type = SelectionNotify;
+            res.display = req->display;
+            res.requestor = req->requestor;
+            res.selection = req->selection;
+            res.target = req->target;
+            res.time = req->time;
+            res.property = None;
+
+            if (req->target == atom_TARGETS) {
+                Atom targets[] = { atom_TARGETS, atom_UTF8_STRING };
+                XChangeProperty(g_dpy, req->requestor, req->property, XA_ATOM, 32,
+                                PropModeReplace, (unsigned char *)&targets, 2);
+                res.property = req->property;
+            } else if (req->target == atom_UTF8_STRING && x11_clipboard_text) {
+                XChangeProperty(g_dpy, req->requestor, req->property, req->target, 8,
+                                PropModeReplace, (unsigned char *)x11_clipboard_text, strlen(x11_clipboard_text));
+                res.property = req->property;
+            }
+            XSendEvent(g_dpy, req->requestor, False, 0, (XEvent *)&res);
+        } else if (ev.type == SelectionNotify) {
+            XSelectionEvent *res = &ev.xselection;
+            if (res->property != None) {
+                Atom actual_type;
+                int actual_format;
+                unsigned long nitems, bytes_after;
+                unsigned char *data = NULL;
+                XGetWindowProperty(g_dpy, g_win, res->property, 0, 1024 * 1024, False,
+                                   AnyPropertyType, &actual_type, &actual_format,
+                                   &nitems, &bytes_after, &data);
+                if (data) {
+                    term_send_input((char *)data, nitems);
+                    XFree(data);
+                }
+                XDeleteProperty(g_dpy, g_win, res->property);
             }
         }
     }
@@ -195,7 +281,11 @@ static WindowBackend _x11_backend = {
     .cleanup = x11_cleanup,
     .poll_events = x11_poll_events,
     .get_fd = x11_get_fd,
-    .flush = x11_flush
+    .flush = x11_flush,
+    .get_timer_fd = x11_get_timer_fd,
+    .set_clipboard = x11_set_clipboard,
+    .get_clipboard = x11_get_clipboard,
+    .handle_timer = NULL
 };
 
 WindowBackend* get_x11_backend(void) {

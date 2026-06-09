@@ -41,6 +41,10 @@ typedef struct {
     
     // Flush the pixel buffer to the screen
     void (*flush)(void);
+    int (*get_timer_fd)(void);
+    void (*set_clipboard)(const char *text);
+    void (*get_clipboard)(void);
+    void (*handle_timer)(void);
 } WindowBackend;
 
 extern WindowBackend *g_backend;
