@@ -103,6 +103,13 @@ void my_free(void *ptr) {
     coalesce(); // Keep the list clean
 }
 
+void my_print(const char *str) {
+    if (!str) return;
+    size_t len = 0;
+    while (str[len]) len++;
+    write(STDERR_FILENO, str, len);
+}
+
 void *my_calloc(size_t nmemb, size_t size) {
     if (nmemb == 0 || size == 0) return NULL;
     
