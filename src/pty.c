@@ -20,6 +20,9 @@
 #include "alloc.h"
 #include "pty.h"
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include "render.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -51,8 +54,8 @@ int pty_spawn(int *master_fd, pid_t *pid, int rows, int cols) {
     memset(&ws, 0, sizeof(ws));
     ws.ws_row = rows;
     ws.ws_col = cols;
-    ws.ws_xpixel = cols * 9;
-    ws.ws_ypixel = rows * 18;
+    ws.ws_xpixel = cols * g_cell_width;
+    ws.ws_ypixel = rows * g_cell_height;
     ioctl(sfd, TIOCSWINSZ, &ws);
 
     struct termios t;
@@ -111,7 +114,7 @@ void pty_resize(int fd, int rows, int cols) {
     memset(&ws, 0, sizeof(ws));
     ws.ws_row = rows;
     ws.ws_col = cols;
-    ws.ws_xpixel = cols * 9;
-    ws.ws_ypixel = rows * 18;
+    ws.ws_xpixel = cols * g_cell_width;
+    ws.ws_ypixel = rows * g_cell_height;
     ioctl(fd, TIOCSWINSZ, &ws);
 }

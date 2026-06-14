@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
 #include "alloc.h"
 #include <stdlib.h>
 #include <unistd.h>
@@ -48,9 +49,9 @@ int g_select_end_col = 0;
 void term_copy(void);
 
 void term_resize(int width, int height) {
-    int new_cols = (width - 2 * g_config.padding_x) / 9;
+    int new_cols = (width - 2 * g_config.padding_x) / g_cell_width;
     if (new_cols < 1) new_cols = 1;
-    int new_rows = (height - 2 * g_config.padding_y) / 18;
+    int new_rows = (height - 2 * g_config.padding_y) / g_cell_height;
     if (new_rows < 1) new_rows = 1;
 
     if (new_cols != vt_state.cols || new_rows != vt_state.rows) {
@@ -66,11 +67,43 @@ void term_send_input(const char *buf, int len) {
     }
 }
 
+static int last_mouse_col = 0;
+static int last_mouse_row = 0;
+
+static void term_send_mouse_event(int button, int is_press, int col, int row) {
+    if (vt_state.mouse_tracking_mode == 0) return;
+    int x = col + 1;
+    int y = row + 1;
+    if (vt_state.mouse_sgr_mode) {
+        char buf[64];
+        int len = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c", button, x, y, is_press ? 'M' : 'm');
+        term_send_input(buf, len);
+    } else {
+        if (x > 223) x = 223;
+        if (y > 223) y = 223;
+        int b = is_press ? button : 3;
+        char buf[6];
+        buf[0] = '\033'; buf[1] = '['; buf[2] = 'M';
+        buf[3] = (char)(32 + b);
+        buf[4] = (char)(32 + x);
+        buf[5] = (char)(32 + y);
+        term_send_input(buf, 6);
+    }
+}
+
 void term_mouse_down(int x, int y) {
+    int col = (x - g_config.padding_x) / g_cell_width;
+    int row = (y - g_config.padding_y) / g_cell_height;
+    last_mouse_col = col;
+    last_mouse_row = row;
+    
+    if (vt_state.mouse_tracking_mode > 0) {
+        term_send_mouse_event(0, 1, col, row);
+        return;
+    }
+
     g_select_active = 0;
     g_select_dragging = 1;
-    int col = (x - g_config.padding_x) / 9;
-    int row = (y - g_config.padding_y) / 18;
     g_select_start_col = col;
     g_select_start_row = row - vt_state.scroll_offset;
     g_select_end_col = col;
@@ -79,10 +112,21 @@ void term_mouse_down(int x, int y) {
 }
 
 void term_mouse_motion(int x, int y) {
+    int col = (x - g_config.padding_x) / g_cell_width;
+    int row = (y - g_config.padding_y) / g_cell_height;
+    last_mouse_col = col;
+    last_mouse_row = row;
+
+    if (vt_state.mouse_tracking_mode > 0) {
+        if (vt_state.mouse_tracking_mode >= 1002) {
+            // Button 0 (left) + 32 (motion) = 32
+            term_send_mouse_event(32, 1, col, row);
+        }
+        return;
+    }
+
     if (g_select_dragging) {
         g_select_active = 1;
-        int col = (x - g_config.padding_x) / 9;
-        int row = (y - g_config.padding_y) / 18;
         if (col < 0) col = 0;
         if (col >= vt_state.cols) col = vt_state.cols - 1;
         g_select_end_col = col;
@@ -92,8 +136,11 @@ void term_mouse_motion(int x, int y) {
 }
 
 void term_mouse_up(int x, int y) {
+    if (vt_state.mouse_tracking_mode > 0) {
+        term_send_mouse_event(0, 0, last_mouse_col, last_mouse_row);
+        return;
+    }
     g_select_dragging = 0;
-    (void)x; (void)y;
 }
 
 void term_copy(void) {
@@ -147,6 +194,12 @@ void term_copy(void) {
 }
 
 void term_scroll(int offset) {
+    if (vt_state.mouse_tracking_mode > 0) {
+        int button = (offset > 0) ? 64 : 65; // 64 = up, 65 = down
+        term_send_mouse_event(button, 1, last_mouse_col, last_mouse_row);
+        return;
+    }
+
     vt_state.scroll_offset += offset;
     if (vt_state.scroll_offset < 0) vt_state.scroll_offset = 0;
     if (vt_state.scroll_offset > vt_state.scrollback_count) {
@@ -177,20 +230,23 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (g_backend->init(g_config.font_name) != 0) {
-        my_print("Backend init failed\n");
-        return 1;
-    }
-
     if (render_init(g_config.font_name) != 0) {
         my_print("Render init failed\n");
         return 1;
     }
 
-    vt_init(&vt_state, g_height / 18, g_width / 9, -1);
+    g_width = 80 * g_cell_width + 2 * g_config.padding_x;
+    g_height = 24 * g_cell_height + 2 * g_config.padding_y;
+
+    if (g_backend->init(g_config.font_name) != 0) {
+        my_print("Backend init failed\n");
+        return 1;
+    }
+
+    vt_init(&vt_state, g_height / g_cell_height, g_width / g_cell_width, -1);
 
     pid_t child_pid;
-    if (pty_spawn(&g_pty_fd, &child_pid, g_height / 18, g_width / 9) != 0) {
+    if (pty_spawn(&g_pty_fd, &child_pid, g_height / g_cell_height, g_width / g_cell_width) != 0) {
         my_print("Failed to spawn PTY\n");
         return 1;
     }

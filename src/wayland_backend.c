@@ -22,6 +22,7 @@
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-client-protocol.h"
+#include "render.h"
 
 #include <sys/mman.h>
 #include <sys/timerfd.h>
@@ -371,13 +372,13 @@ static const struct wl_seat_listener seat_listener = { .capabilities = seat_capa
 static void output_geometry(void *data, struct wl_output *wl_output, int32_t x, int32_t y, int32_t physical_width, int32_t physical_height, int32_t subpixel, const char *make, const char *model, int32_t transform) {}
 static void output_mode(void *data, struct wl_output *wl_output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
     if (flags & WL_OUTPUT_MODE_CURRENT) {
-        if (g_width == 80 * 9 + 2 * g_config.padding_x && g_height == 24 * 18 + 2 * g_config.padding_y) {
+        if (g_width == 80 * g_cell_width + 2 * g_config.padding_x && g_height == 24 * g_cell_height + 2 * g_config.padding_y) {
             g_width = width * 0.9;
             g_height = height * 0.9;
-            int cols = (g_width - 2 * g_config.padding_x) / 9;
-            int rows = (g_height - 2 * g_config.padding_y) / 18;
-            g_width = cols * 9 + 2 * g_config.padding_x;
-            g_height = rows * 18 + 2 * g_config.padding_y;
+            int cols = (g_width - 2 * g_config.padding_x) / g_cell_width;
+            int rows = (g_height - 2 * g_config.padding_y) / g_cell_height;
+            g_width = cols * g_cell_width + 2 * g_config.padding_x;
+            g_height = rows * g_cell_height + 2 * g_config.padding_y;
         }
     }
 }
@@ -418,9 +419,6 @@ static int wayland_init(const char *font_pattern) {
     (void)font_pattern;
     wl_display = wl_display_connect(NULL);
     if (!wl_display) return -1;
-
-    g_width = 80 * 9 + 2 * g_config.padding_x;
-    g_height = 24 * 18 + 2 * g_config.padding_y;
 
     struct wl_registry *registry = wl_display_get_registry(wl_display);
     wl_registry_add_listener(registry, &registry_listener, NULL);

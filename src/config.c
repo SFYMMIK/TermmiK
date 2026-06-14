@@ -82,16 +82,16 @@ static void copy_string(char *dest, const char *src, int len, int max_len) {
 extern char *getenv(const char *name);
 
 void config_load(void) {
-    g_config.colors[0] = 0x000000; g_config.colors[8] = 0x555555;
-    g_config.colors[1] = 0xAA0000; g_config.colors[9] = 0xFF5555;
-    g_config.colors[2] = 0x00AA00; g_config.colors[10] = 0x55FF55;
-    g_config.colors[3] = 0xAA5500; g_config.colors[11] = 0xFFFF55;
-    g_config.colors[4] = 0x0000AA; g_config.colors[12] = 0x5555FF;
-    g_config.colors[5] = 0xAA00AA; g_config.colors[13] = 0xFF55FF;
-    g_config.colors[6] = 0x00AAAA; g_config.colors[14] = 0x55FFFF;
-    g_config.colors[7] = 0xAAAAAA; g_config.colors[15] = 0xFFFFFF;
+    g_config.colors[0] = 0x000000; g_config.colors[8] = 0x767676;
+    g_config.colors[1] = 0xcc0403; g_config.colors[9] = 0xf2201f;
+    g_config.colors[2] = 0x19cb00; g_config.colors[10] = 0x23fd00;
+    g_config.colors[3] = 0xcecb00; g_config.colors[11] = 0xfffd00;
+    g_config.colors[4] = 0x0d73cc; g_config.colors[12] = 0x1a8fcf;
+    g_config.colors[5] = 0xcb1ed1; g_config.colors[13] = 0xfd28ff;
+    g_config.colors[6] = 0x0dcdcd; g_config.colors[14] = 0x14ffff;
+    g_config.colors[7] = 0xdddddd; g_config.colors[15] = 0xffffff;
 
-    g_config.fg_color = 0xAAAAAA;
+    g_config.fg_color = 0xdddddd;
     g_config.bg_color = 0x000000;
     copy_string(g_config.font_name, "monospace", 9, 256);
     g_config.font_size = 14;

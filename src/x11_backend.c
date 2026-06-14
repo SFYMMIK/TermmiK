@@ -63,9 +63,6 @@ static int x11_init(const char *font_pattern) {
     int screen = DefaultScreen(g_dpy);
     Window root = RootWindow(g_dpy, screen);
 
-    g_width = 80 * 9 + 2 * g_config.padding_x; // default 80 cols, 9px width
-    g_height = 24 * 18 + 2 * g_config.padding_y;
-
     XVisualInfo vinfo;
     if (g_config.opacity < 1.0f && XMatchVisualInfo(g_dpy, screen, 32, TrueColor, &vinfo)) {
         g_visual = vinfo.visual;

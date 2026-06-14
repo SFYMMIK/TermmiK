@@ -57,15 +57,45 @@ typedef struct {
     int save_x;
     int save_y;
     
+    // Scroll region (DECSTBM)
+    int scroll_top;
+    int scroll_bottom;
+    
+    // Cursor save/restore (DECSC/DECRC)
+    int saved_cursor_x;
+    int saved_cursor_y;
+    uint32_t saved_fg;
+    uint32_t saved_bg;
+    
+    // Cursor visibility (?25h/l)
+    int cursor_visible;
+    
+    // Application cursor keys (?1h/l)
+    int app_cursor_keys;
+    
+    // Mouse tracking
+    int mouse_tracking_mode;
+    int mouse_sgr_mode;
+    
+    // SGR text attributes
+    int bold;
+    int dim;
+    int italic;
+    int underline;
+    int reverse;
+    int strikethrough;
+    
     int cursor_x;
     int cursor_y;
     uint32_t current_fg;
     uint32_t current_bg;
+    int current_fg_idx;
     
     // Parser state
     int state;
     int params[16];
     int num_params;
+    int csi_private;  // tracks '?' prefix in CSI sequences
     
     int pty_fd;
 } VTState;

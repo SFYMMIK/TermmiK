@@ -23,6 +23,10 @@
 #include "vt_parser.h"
 
 
+extern int g_cell_width;
+extern int g_cell_height;
+extern int g_baseline;
+
 int render_init(const char *font_pattern);
 void render_draw(VTState *state);
 void render_cleanup(void);

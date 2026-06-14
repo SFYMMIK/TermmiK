@@ -32,8 +32,9 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
-#define CELL_W 9
-#define CELL_H 18
+int g_cell_width = 9;
+int g_cell_height = 18;
+int g_baseline = 14;
 
 typedef struct {
     unsigned char *bitmap;
@@ -62,7 +63,8 @@ static void* map_font(const char *path) {
 
 int render_init(const char *font_pattern) {
     for (int i = 0; i < 256; i++) {
-        gamma_table[i] = (unsigned char)(powf(i / 255.0f, 1.0f / 1.5f) * 255.0f);
+        // Linear alpha blending (no thickening) for crispness
+        gamma_table[i] = (unsigned char)(i);
     }
 
     FcConfig *config = FcInitLoadConfigAndFonts();
@@ -79,7 +81,7 @@ int render_init(const char *font_pattern) {
                 unsigned char *ttf_buf = map_font((const char *)file);
                 if (ttf_buf) {
                     if (stbtt_InitFont(&g_fonts[g_num_fonts], ttf_buf, stbtt_GetFontOffsetForIndex(ttf_buf, 0))) {
-                        g_font_scales[g_num_fonts] = stbtt_ScaleForPixelHeight(&g_fonts[g_num_fonts], g_config.font_size * 1.25f);
+                        g_font_scales[g_num_fonts] = stbtt_ScaleForPixelHeight(&g_fonts[g_num_fonts], g_config.font_size * 1.333333f);
                         g_num_fonts++;
                     }
                 }
@@ -90,6 +92,19 @@ int render_init(const char *font_pattern) {
     FcPatternDestroy(pat);
     FcConfigDestroy(config);
     memset(g_glyph_cache, 0, sizeof(g_glyph_cache));
+
+    if (g_num_fonts > 0) {
+        int ascent, descent, lineGap;
+        stbtt_GetFontVMetrics(&g_fonts[0], &ascent, &descent, &lineGap);
+        g_cell_height = (int)ceilf((ascent - descent + lineGap) * g_font_scales[0]);
+        if (g_cell_height < 1) g_cell_height = 18;
+        g_baseline = (int)roundf(ascent * g_font_scales[0]);
+
+        int advance, lsb;
+        stbtt_GetCodepointHMetrics(&g_fonts[0], 'M', &advance, &lsb);
+        g_cell_width = (int)roundf(advance * g_font_scales[0]);
+        if (g_cell_width < 1) g_cell_width = 9;
+    }
 
     return 0;
 }
@@ -157,6 +172,13 @@ void render_draw(VTState *state) {
             uint32_t bg = c.bg_color;
             uint32_t fg = c.fg_color;
 
+            // Reverse video: swap fg and bg
+            if (state->reverse) {
+                uint32_t tmp = bg;
+                bg = fg;
+                fg = tmp;
+            }
+
             int is_selected = 0;
             if (g_select_active) {
                 int r1 = g_select_start_row, c1 = g_select_start_col;
@@ -177,7 +199,7 @@ void render_draw(VTState *state) {
                 fg = c.bg_color;
             }
             
-            int is_cursor = (logical_y == state->cursor_y && x == state->cursor_x);
+            int is_cursor = (state->cursor_visible && logical_y == state->cursor_y && x == state->cursor_x);
             if (is_cursor && g_config.cursor_shape == 0) {
                 bg = g_config.cursor_color;
                 fg = c.bg_color;
@@ -188,13 +210,13 @@ void render_draw(VTState *state) {
                 bg_pixel = bg | 0xFF000000;
             }
 
-            int start_x = g_config.padding_x + x * CELL_W;
-            int start_y = g_config.padding_y + y * CELL_H;
+            int start_x = g_config.padding_x + x * g_cell_width;
+            int start_y = g_config.padding_y + y * g_cell_height;
 
-            for (int cy = 0; cy < CELL_H; cy++) {
+            for (int cy = 0; cy < g_cell_height; cy++) {
                 int screen_y = start_y + cy;
                 if (screen_y >= g_height) break;
-                for (int cx = 0; cx < CELL_W; cx++) {
+                for (int cx = 0; cx < g_cell_width; cx++) {
                     int screen_x = start_x + cx;
                     if (screen_x >= g_width) break;
                     g_framebuffer[screen_y * g_width + screen_x] = bg_pixel;
@@ -213,7 +235,7 @@ void render_draw(VTState *state) {
                         }
                     }
                     if (!bitmap && c.char_code >= 0x2500 && c.char_code <= 0x257F) {
-                        w = CELL_W; h = CELL_H; xoff = 0; yoff = -14;
+                        w = g_cell_width; h = g_cell_height; xoff = 0; yoff = -(g_cell_height * 14 / 18);
                         bitmap = calloc(1, w * h);
                         int mid_x = w / 2;
                         int mid_y = h / 2;
@@ -239,7 +261,7 @@ void render_draw(VTState *state) {
                 
                 if (c.char_code != ' ') {
                     Glyph *b = &g_glyph_cache[c.char_code];
-                    int w = b->w; int h = b->h; int xoff = b->xoff; int yoff = b->yoff + (int)(g_config.font_size * 1.05f);
+                    int w = b->w; int h = b->h; int xoff = b->xoff; int yoff = b->yoff + g_baseline;
                     for (int cy = 0; cy < h; cy++) {
                         for (int cx = 0; cx < w; cx++) {
                             int pX = start_x + xoff + cx; int pY = start_y + yoff + cy;
@@ -265,8 +287,8 @@ void render_draw(VTState *state) {
             if (is_cursor) {
                 uint32_t c_color = g_config.cursor_color | 0xFF000000;
                 if (g_config.cursor_shape == 1) {
-                    int cy = start_y + CELL_H - 2;
-                    for (int cx = 0; cx < CELL_W; cx++) {
+                    int cy = start_y + g_cell_height - 2;
+                    for (int cx = 0; cx < g_cell_width; cx++) {
                         int sx = start_x + cx;
                         if (sx < g_width && cy < g_height && cy >= 0) {
                             g_framebuffer[cy * g_width + sx] = c_color;
@@ -274,7 +296,7 @@ void render_draw(VTState *state) {
                         }
                     }
                 } else if (g_config.cursor_shape == 2) {
-                    for (int cy = 0; cy < CELL_H; cy++) {
+                    for (int cy = 0; cy < g_cell_height; cy++) {
                         int sy = start_y + cy;
                         if (start_x < g_width && sy < g_height && sy >= 0) {
                             g_framebuffer[sy * g_width + start_x] = c_color;

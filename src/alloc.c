@@ -78,19 +78,20 @@ void *my_malloc(size_t size) {
     if (block == MAP_FAILED) return NULL;
 
     block->is_free = 0;
-    block->next = head;
-    head = block;
 
-    // If we got extra page space, split it and add the remainder to the free list
     if (mmap_size >= total + sizeof(Block) + 8) {
         block->size = size;
         Block *split = (Block *)((char *)block + total);
         split->size = mmap_size - total - sizeof(Block);
         split->is_free = 1;
         split->next = head;
-        head = split; // Split goes to the front of the list
+        
+        block->next = split;
+        head = block;
     } else {
         block->size = mmap_size - sizeof(Block);
+        block->next = head;
+        head = block;
     }
 
     return (char *)block + sizeof(Block);
