@@ -32,8 +32,17 @@ elif command -v apt-get &> /dev/null; then
 
 elif command -v xbps-install &> /dev/null; then
     echo "Detected Void Linux / xbps."
+    echo -e "\e[1;33m[!] WARNING for Void Linux users: If dependency installation fails,\e[0m"
+    echo -e "\e[1;33m    please abort and run 'sudo xbps-install -Su' first to update your system.\e[0m"
     DEPS=(base-devel git wayland-devel libX11-devel libxkbcommon-devel fontconfig-devel freetype-devel pkg-config)
     sudo xbps-install -Sy "${DEPS[@]}" || { echo -e "\e[1;31mDependency installation failed.\e[0m"; exit 1; }
+
+elif command -v eopkg &> /dev/null; then
+    echo "Detected Solus Linux / eopkg."
+    echo "Installing build essentials (system.devel)..."
+    sudo eopkg install -c system.devel -y || { echo -e "\e[1;31mFailed to install build essentials.\e[0m"; exit 1; }
+    DEPS=(git wayland-devel libx11-devel libxkbcommon-devel fontconfig-devel freetype2-devel pkgconfig)
+    sudo eopkg install -y "${DEPS[@]}" || { echo -e "\e[1;31mDependency installation failed.\e[0m"; exit 1; }
 
 elif command -v emerge &> /dev/null; then
     echo "Detected Gentoo / emerge."
