@@ -63,8 +63,9 @@ static void* map_font(const char *path) {
 
 int render_init(const char *font_pattern) {
     for (int i = 0; i < 256; i++) {
-        // Linear alpha blending (no thickening) for crispness
-        gamma_table[i] = (unsigned char)(i);
+        // Gamma correction to thicken text (makes fonts look "fatter" like Kitty)
+        float v = i / 255.0f;
+        gamma_table[i] = (unsigned char)(powf(v, 1.0f / 1.5f) * 255.0f);
     }
 
     FcConfig *config = FcInitLoadConfigAndFonts();
@@ -171,13 +172,6 @@ void render_draw(VTState *state) {
             
             uint32_t bg = c.bg_color;
             uint32_t fg = c.fg_color;
-
-            // Reverse video: swap fg and bg
-            if (state->reverse) {
-                uint32_t tmp = bg;
-                bg = fg;
-                fg = tmp;
-            }
 
             int is_selected = 0;
             if (g_select_active) {

@@ -243,10 +243,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    vt_init(&vt_state, g_height / g_cell_height, g_width / g_cell_width, -1);
+    int initial_cols = (g_width - 2 * g_config.padding_x) / g_cell_width;
+    if (initial_cols < 1) initial_cols = 1;
+    int initial_rows = (g_height - 2 * g_config.padding_y) / g_cell_height;
+    if (initial_rows < 1) initial_rows = 1;
+
+    vt_init(&vt_state, initial_rows, initial_cols, -1);
 
     pid_t child_pid;
-    if (pty_spawn(&g_pty_fd, &child_pid, g_height / g_cell_height, g_width / g_cell_width) != 0) {
+    if (pty_spawn(&g_pty_fd, &child_pid, initial_rows, initial_cols) != 0) {
         my_print("Failed to spawn PTY\n");
         return 1;
     }

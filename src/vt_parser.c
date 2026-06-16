@@ -32,8 +32,8 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
                 new_cells[y * new_cols + x] = state->cells[y * state->cols + x];
             } else {
                 new_cells[y * new_cols + x].char_code = ' ';
-                new_cells[y * new_cols + x].fg_color = state->current_fg;
-                new_cells[y * new_cols + x].bg_color = state->current_bg;
+                new_cells[y * new_cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                new_cells[y * new_cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
         }
     }
@@ -51,8 +51,8 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
                     new_alt[y * new_cols + x] = state->alt_cells[y * state->alt_cols + x];
                 } else {
                     new_alt[y * new_cols + x].char_code = ' ';
-                    new_alt[y * new_cols + x].fg_color = state->current_fg;
-                    new_alt[y * new_cols + x].bg_color = state->current_bg;
+                    new_alt[y * new_cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                    new_alt[y * new_cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
                 }
             }
         }
@@ -104,8 +104,8 @@ void vt_init(VTState *state, int rows, int cols, int pty_fd) {
     for (int y = 0; y < state->rows; y++) {
         for (int x = 0; x < state->cols; x++) {
             state->cells[(y) * state->cols + (x)].char_code = ' ';
-            state->cells[(y) * state->cols + (x)].fg_color = state->current_fg;
-            state->cells[(y) * state->cols + (x)].bg_color = state->current_bg;
+            state->cells[(y) * state->cols + (x)].fg_color = state->reverse ? state->current_bg : state->current_fg;
+            state->cells[(y) * state->cols + (x)].bg_color = state->reverse ? state->current_fg : state->current_bg;
         }
     }
 }
@@ -152,8 +152,8 @@ static void scroll_region_up(VTState *state, int n) {
             // Clear the bottom line
             for (int x = 0; x < state->cols; x++) {
                 state->cells[bot * state->cols + x].char_code = ' ';
-                state->cells[bot * state->cols + x].fg_color = state->current_fg;
-                state->cells[bot * state->cols + x].bg_color = state->current_bg;
+                state->cells[bot * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                state->cells[bot * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
         }
     } else {
@@ -166,8 +166,8 @@ static void scroll_region_up(VTState *state, int n) {
             }
             for (int x = 0; x < state->cols; x++) {
                 state->cells[bot * state->cols + x].char_code = ' ';
-                state->cells[bot * state->cols + x].fg_color = state->current_fg;
-                state->cells[bot * state->cols + x].bg_color = state->current_bg;
+                state->cells[bot * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                state->cells[bot * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
         }
     }
@@ -191,8 +191,8 @@ static void scroll_region_down(VTState *state, int n) {
         }
         for (int x = 0; x < state->cols; x++) {
             state->cells[top * state->cols + x].char_code = ' ';
-            state->cells[top * state->cols + x].fg_color = state->current_fg;
-            state->cells[top * state->cols + x].bg_color = state->current_bg;
+            state->cells[top * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+            state->cells[top * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
         }
     }
 }
@@ -248,8 +248,8 @@ static void put_char(VTState *state, uint32_t c) {
             }
         }
         state->cells[(state->cursor_y) * state->cols + (state->cursor_x)].char_code = c;
-        state->cells[(state->cursor_y) * state->cols + (state->cursor_x)].fg_color = state->current_fg;
-        state->cells[(state->cursor_y) * state->cols + (state->cursor_x)].bg_color = state->current_bg;
+        state->cells[(state->cursor_y) * state->cols + (state->cursor_x)].fg_color = state->reverse ? state->current_bg : state->current_fg;
+        state->cells[(state->cursor_y) * state->cols + (state->cursor_x)].bg_color = state->reverse ? state->current_fg : state->current_bg;
         state->cursor_x++;
     }
 }
@@ -393,35 +393,35 @@ static void handle_csi(VTState *state, char c, int is_private) {
         if (mode == 0) {
             for (int x = state->cursor_x; x < state->cols; x++) {
                 state->cells[state->cursor_y * state->cols + x].char_code = ' ';
-                state->cells[state->cursor_y * state->cols + x].fg_color = state->current_fg;
-                state->cells[state->cursor_y * state->cols + x].bg_color = state->current_bg;
+                state->cells[state->cursor_y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                state->cells[state->cursor_y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
             for (int y = state->cursor_y + 1; y < state->rows; y++) {
                 for (int x = 0; x < state->cols; x++) {
                     state->cells[y * state->cols + x].char_code = ' ';
-                    state->cells[y * state->cols + x].fg_color = state->current_fg;
-                    state->cells[y * state->cols + x].bg_color = state->current_bg;
+                    state->cells[y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                    state->cells[y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
                 }
             }
         } else if (mode == 1) {
             for (int y = 0; y < state->cursor_y; y++) {
                 for (int x = 0; x < state->cols; x++) {
                     state->cells[y * state->cols + x].char_code = ' ';
-                    state->cells[y * state->cols + x].fg_color = state->current_fg;
-                    state->cells[y * state->cols + x].bg_color = state->current_bg;
+                    state->cells[y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                    state->cells[y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
                 }
             }
             for (int x = 0; x <= state->cursor_x && x < state->cols; x++) {
                 state->cells[state->cursor_y * state->cols + x].char_code = ' ';
-                state->cells[state->cursor_y * state->cols + x].fg_color = state->current_fg;
-                state->cells[state->cursor_y * state->cols + x].bg_color = state->current_bg;
+                state->cells[state->cursor_y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                state->cells[state->cursor_y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
         } else if (mode == 2) {
             for (int y = 0; y < state->rows; y++) {
                 for (int x = 0; x < state->cols; x++) {
                     state->cells[(y) * state->cols + (x)].char_code = ' ';
-                    state->cells[(y) * state->cols + (x)].fg_color = state->current_fg;
-                    state->cells[(y) * state->cols + (x)].bg_color = state->current_bg;
+                    state->cells[(y) * state->cols + (x)].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                    state->cells[(y) * state->cols + (x)].bg_color = state->reverse ? state->current_fg : state->current_bg;
                 }
             }
         } else if (mode == 3) {
@@ -512,8 +512,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
                             for (int y = 0; y < state->rows; y++) {
                                 for (int x = 0; x < state->cols; x++) {
                                     state->cells[y * state->cols + x].char_code = ' ';
-                                    state->cells[y * state->cols + x].fg_color = state->current_fg;
-                                    state->cells[y * state->cols + x].bg_color = state->current_bg;
+                                    state->cells[y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                                    state->cells[y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
                                 }
                             }
                             state->cursor_x = 0;
@@ -604,8 +604,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
         // mode == 2: entire line (start_x=0, end_x=cols)
         for (int x = start_x; x < end_x; x++) {
             state->cells[(state->cursor_y) * state->cols + (x)].char_code = ' ';
-            state->cells[(state->cursor_y) * state->cols + (x)].fg_color = state->current_fg;
-            state->cells[(state->cursor_y) * state->cols + (x)].bg_color = state->current_bg;
+            state->cells[(state->cursor_y) * state->cols + (x)].fg_color = state->reverse ? state->current_bg : state->current_fg;
+            state->cells[(state->cursor_y) * state->cols + (x)].bg_color = state->reverse ? state->current_fg : state->current_bg;
         }
     } else if (c == 'L') {
         // IL — Insert Lines: insert N blank lines at cursor row, pushing existing lines down
@@ -624,8 +624,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
         for (int y = top; y < top + n && y <= bot; y++) {
             for (int x = 0; x < state->cols; x++) {
                 state->cells[y * state->cols + x].char_code = ' ';
-                state->cells[y * state->cols + x].fg_color = state->current_fg;
-                state->cells[y * state->cols + x].bg_color = state->current_bg;
+                state->cells[y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                state->cells[y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
         }
     } else if (c == 'M') {
@@ -645,8 +645,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
         for (int y = bot - n + 1; y <= bot; y++) {
             for (int x = 0; x < state->cols; x++) {
                 state->cells[y * state->cols + x].char_code = ' ';
-                state->cells[y * state->cols + x].fg_color = state->current_fg;
-                state->cells[y * state->cols + x].bg_color = state->current_bg;
+                state->cells[y * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+                state->cells[y * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
             }
         }
     } else if (c == 'P') {
@@ -662,8 +662,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
         // Clear vacated characters at end of line
         for (int x = state->cols - n; x < state->cols; x++) {
             state->cells[row * state->cols + x].char_code = ' ';
-            state->cells[row * state->cols + x].fg_color = state->current_fg;
-            state->cells[row * state->cols + x].bg_color = state->current_bg;
+            state->cells[row * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+            state->cells[row * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
         }
     } else if (c == '@') {
         // ICH — Insert Characters: insert N blank chars at cursor, shift rest right
@@ -678,8 +678,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
         // Clear inserted characters
         for (int x = col; x < col + n && x < state->cols; x++) {
             state->cells[row * state->cols + x].char_code = ' ';
-            state->cells[row * state->cols + x].fg_color = state->current_fg;
-            state->cells[row * state->cols + x].bg_color = state->current_bg;
+            state->cells[row * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+            state->cells[row * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
         }
     } else if (c == 'X') {
         // ECH — Erase Characters: erase N chars at cursor (without moving cursor)
@@ -687,8 +687,8 @@ static void handle_csi(VTState *state, char c, int is_private) {
         int row = state->cursor_y;
         for (int x = state->cursor_x; x < state->cursor_x + n && x < state->cols; x++) {
             state->cells[row * state->cols + x].char_code = ' ';
-            state->cells[row * state->cols + x].fg_color = state->current_fg;
-            state->cells[row * state->cols + x].bg_color = state->current_bg;
+            state->cells[row * state->cols + x].fg_color = state->reverse ? state->current_bg : state->current_fg;
+            state->cells[row * state->cols + x].bg_color = state->reverse ? state->current_fg : state->current_bg;
         }
     } else if (c == 'S') {
         // SU — Scroll Up: scroll up N lines within scroll region
@@ -883,7 +883,7 @@ void vt_process(VTState *state, const char *buf, int len) {
             } else if (c >= '0' && c <= '9') {
                 if (state->num_params == 0) state->num_params = 1;
                 state->params[state->num_params - 1] = state->params[state->num_params - 1] * 10 + (c - '0');
-            } else if (c == ';') {
+            } else if (c == ';' || c == ':') {
                 if (state->num_params < 16) {
                     state->num_params++;
                 }
