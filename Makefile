@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -fno-builtin -Wall -Wextra -Wno-unused-parameter -Os -ffunction-sections -fdata-sections -Iinclude -flto
+CFLAGS = -fno-builtin -Wall -Wextra -Wno-unused-parameter -O0 -g -ffunction-sections -fdata-sections -Iinclude
 LDFLAGS = -lm -lfontconfig -Wl,--gc-sections -flto
 
 SRCS = src/main.c src/pty.c src/vt_parser.c src/render.c src/alloc.c src/config.c
@@ -26,7 +26,7 @@ build_dir:
 
 $(EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $(EXEC) $(LDFLAGS)
-	strip $(EXEC)
+	# strip $(EXEC)
 
 build/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@

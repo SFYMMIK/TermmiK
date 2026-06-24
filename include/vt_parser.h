@@ -27,6 +27,7 @@ typedef struct {
     uint32_t char_code;
     uint32_t fg_color;
     uint32_t bg_color;
+    int wrapped;
 } Cell;
 
 typedef struct {
