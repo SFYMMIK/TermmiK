@@ -109,7 +109,7 @@ static int x11_init(const char *font_pattern) {
     }
 
     if (g_shm_supported) {
-        g_ximage = XShmCreateImage(g_dpy, vinfo.visual, vinfo.depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
+        g_ximage = XShmCreateImage(g_dpy, g_visual, g_depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
         g_shminfo.shmid = shmget(IPC_PRIVATE, g_ximage->bytes_per_line * g_ximage->height, IPC_CREAT|0600);
         g_shminfo.shmaddr = g_ximage->data = shmat(g_shminfo.shmid, 0, 0);
         g_shminfo.readOnly = False;
@@ -120,7 +120,7 @@ static int x11_init(const char *font_pattern) {
     } else {
         // Fallback
         g_framebuffer = malloc(g_width * g_height * 4);
-        g_ximage = XCreateImage(g_dpy, vinfo.visual, vinfo.depth, ZPixmap, 0, (char *)g_framebuffer, g_width, g_height, 32, 0);
+        g_ximage = XCreateImage(g_dpy, g_visual, g_depth, ZPixmap, 0, (char *)g_framebuffer, g_width, g_height, 32, 0);
     }
 
     return 0;
