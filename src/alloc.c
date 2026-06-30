@@ -30,15 +30,40 @@ typedef struct Block {
 static Block *head = NULL;
 
 // Helper to merge adjacent free blocks to prevent catastrophic fragmentation
+// Sorts list by memory address first so split blocks from the same mmap can merge
 static void coalesce() {
+    // Insertion sort by memory address — needed because blocks are
+    // inserted at head in arbitrary order, so adjacent-in-memory blocks
+    // may not be adjacent in the list
+    if (!head || !head->next) return;
+    
+    Block *sorted = NULL;
     Block *curr = head;
+    while (curr) {
+        Block *next = curr->next;
+        if (!sorted || (char *)curr < (char *)sorted) {
+            curr->next = sorted;
+            sorted = curr;
+        } else {
+            Block *s = sorted;
+            while (s->next && (char *)s->next < (char *)curr) {
+                s = s->next;
+            }
+            curr->next = s->next;
+            s->next = curr;
+        }
+        curr = next;
+    }
+    head = sorted;
+
+    // Now merge adjacent free blocks (list is in memory order)
+    curr = head;
     while (curr && curr->next) {
         if (curr->is_free && curr->next->is_free) {
-            // Ensure they are actually contiguous in physical memory
             if ((char *)curr + sizeof(Block) + curr->size == (char *)curr->next) {
                 curr->size += sizeof(Block) + curr->next->size;
                 curr->next = curr->next->next;
-                continue; // Check again with the new next block
+                continue;
             }
         }
         curr = curr->next;

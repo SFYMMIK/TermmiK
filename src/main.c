@@ -37,6 +37,7 @@ uint32_t *g_framebuffer = NULL;
 int g_pty_fd = -1;
 static VTState vt_state;
 static int needs_render = 1;
+static int vt_initialized = 0;
 WindowBackend *g_backend = NULL;
 
 int g_select_active = 0;
@@ -49,6 +50,8 @@ int g_select_end_col = 0;
 void term_copy(void);
 
 void term_resize(int width, int height) {
+    if (!vt_initialized) return;
+    
     int new_cols = (width - 2 * g_config.padding_x) / g_cell_width;
     if (new_cols < 1) new_cols = 1;
     int new_rows = (height - 2 * g_config.padding_y) / g_cell_height;
@@ -249,6 +252,7 @@ int main(int argc, char **argv) {
     if (initial_rows < 1) initial_rows = 1;
 
     vt_init(&vt_state, initial_rows, initial_cols, -1);
+    vt_initialized = 1;
 
     pid_t child_pid;
     if (pty_spawn(&g_pty_fd, &child_pid, initial_rows, initial_cols) != 0) {

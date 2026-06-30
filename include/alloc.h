@@ -33,6 +33,5 @@ void my_print(const char *str);
 #define calloc my_calloc
 #define realloc my_realloc
 #define free my_free
-#define fprintf(f, str, ...) my_print(str)
 
 #endif

@@ -129,6 +129,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
                 phys_lines = my_realloc(phys_lines, phys_cap * sizeof(PhysLine));
             }
             Cell *row = my_malloc(new_cols * sizeof(Cell));
+            if (!row) goto alloc_fail;
             for(int k=0; k<new_cols; k++) row[k] = empty_cell;
             phys_lines[num_phys].cells = row;
             phys_lines[num_phys].cols = new_cols;
@@ -152,6 +153,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
             }
             
             Cell *row = my_malloc(new_cols * sizeof(Cell));
+            if (!row) goto alloc_fail;
             for(int k=0; k<new_cols; k++) {
                 if (k < chunk) {
                     row[k] = ll->cells[offset + k];
@@ -185,7 +187,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     for(int i=0; i<num_lines; i++) {
         if(lines[i].cells) my_free(lines[i].cells);
     }
-    if (lines) my_free(lines);
+    if (lines) { my_free(lines); lines = NULL; }
 
     int new_primary_start = num_phys - new_rows;
     if (new_primary_start < 0) new_primary_start = 0;
@@ -222,6 +224,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     }
     
     Cell *new_primary = my_malloc(new_rows * new_cols * sizeof(Cell));
+    if (!new_primary) goto alloc_fail;
     for (int y = 0; y < new_rows; y++) {
         int py = new_primary_start + y;
         for (int x = 0; x < new_cols; x++) {
@@ -231,10 +234,10 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
                 new_primary[y * new_cols + x] = empty_cell;
             }
         }
-        if (py < num_phys) my_free(phys_lines[py].cells);
+        if (py < num_phys) { my_free(phys_lines[py].cells); phys_lines[py].cells = NULL; }
     }
     
-    if (phys_lines) my_free(phys_lines);
+    if (phys_lines) { my_free(phys_lines); phys_lines = NULL; }
     
     int act_cur_y = final_cur_y - new_primary_start;
     if (act_cur_y < 0) act_cur_y = 0;
@@ -247,6 +250,10 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         int old_alt_cols = state->alt_screen_active ? state->cols : state->alt_cols;
         
         new_alt = my_malloc(new_rows * new_cols * sizeof(Cell));
+        if (!new_alt) {
+            my_free(new_primary);
+            goto alloc_fail;
+        }
         for (int y = 0; y < new_rows; y++) {
             for (int x = 0; x < new_cols; x++) {
                 if (y < old_alt_rows && x < old_alt_cols) {
@@ -291,6 +298,17 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     
     state->scroll_top = 0;
     state->scroll_bottom = new_rows - 1;
+    return;
+    
+alloc_fail:
+    for(int i=0; i<num_lines; i++) {
+        if(lines && lines[i].cells) my_free(lines[i].cells);
+    }
+    if (lines) my_free(lines);
+    for(int i=0; i<num_phys; i++) {
+        if(phys_lines && phys_lines[i].cells) my_free(phys_lines[i].cells);
+    }
+    if (phys_lines) my_free(phys_lines);
 }
 
 
@@ -309,6 +327,11 @@ void vt_init(VTState *state, int rows, int cols, int pty_fd) {
     state->cols = cols;
     state->pty_fd = pty_fd;
     state->cells = my_malloc(rows * cols * sizeof(Cell));
+    if (!state->cells) {
+        state->rows = 0;
+        state->cols = 0;
+        return;
+    }
     state->current_fg = g_config.fg_color;
     state->current_bg = g_config.bg_color;
     state->current_fg_idx = -1;
@@ -348,6 +371,7 @@ static void scroll_region_up(VTState *state, int n) {
     if (top == 0 && bot == state->rows - 1) {
         for (int s = 0; s < n; s++) {
             Cell *old_line = my_malloc(state->cols * sizeof(Cell));
+            if (!old_line) goto skip_scrollback;
             for (int x = 0; x < state->cols; x++) {
                 old_line[x] = state->cells[0 * state->cols + x];
             }
@@ -366,6 +390,7 @@ static void scroll_region_up(VTState *state, int n) {
             } else {
                 my_free(old_line);
             }
+            skip_scrollback:
             
             // Shift lines up by 1
             for (int y = top; y < bot; y++) {
@@ -731,6 +756,10 @@ static void handle_csi(VTState *state, char c, int is_private) {
                             state->alt_rows = state->rows;
                             state->alt_cols = state->cols;
                             state->alt_cells = my_malloc(state->rows * state->cols * sizeof(Cell));
+                            if (!state->alt_cells) {
+                                state->alt_screen_active = 0;
+                                break;
+                            }
                             memcpy(state->alt_cells, state->cells, state->rows * state->cols * sizeof(Cell));
                             state->save_x = state->cursor_x;
                             state->save_y = state->cursor_y;

@@ -124,6 +124,11 @@ void render_draw(VTState *state) {
     if (shadow_w != g_width || shadow_h != g_height || !shadow_buffer) {
         if (shadow_buffer) my_free(shadow_buffer);
         shadow_buffer = my_malloc(g_width * g_height * 4);
+        if (!shadow_buffer) {
+            shadow_w = 0;
+            shadow_h = 0;
+            return;
+        }
         shadow_w = g_width;
         shadow_h = g_height;
     }
