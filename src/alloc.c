@@ -24,51 +24,11 @@
 typedef struct Block {
     size_t size;
     struct Block *next;
+    struct Block *prev;
     int is_free;
 } Block;
 
 static Block *head = NULL;
-
-// Helper to merge adjacent free blocks to prevent catastrophic fragmentation
-// Sorts list by memory address first so split blocks from the same mmap can merge
-static void coalesce() {
-    // Insertion sort by memory address — needed because blocks are
-    // inserted at head in arbitrary order, so adjacent-in-memory blocks
-    // may not be adjacent in the list
-    if (!head || !head->next) return;
-    
-    Block *sorted = NULL;
-    Block *curr = head;
-    while (curr) {
-        Block *next = curr->next;
-        if (!sorted || (char *)curr < (char *)sorted) {
-            curr->next = sorted;
-            sorted = curr;
-        } else {
-            Block *s = sorted;
-            while (s->next && (char *)s->next < (char *)curr) {
-                s = s->next;
-            }
-            curr->next = s->next;
-            s->next = curr;
-        }
-        curr = next;
-    }
-    head = sorted;
-
-    // Now merge adjacent free blocks (list is in memory order)
-    curr = head;
-    while (curr && curr->next) {
-        if (curr->is_free && curr->next->is_free) {
-            if ((char *)curr + sizeof(Block) + curr->size == (char *)curr->next) {
-                curr->size += sizeof(Block) + curr->next->size;
-                curr->next = curr->next->next;
-                continue;
-            }
-        }
-        curr = curr->next;
-    }
-}
 
 void *my_malloc(size_t size) {
     if (size == 0) return NULL;
@@ -84,6 +44,8 @@ void *my_malloc(size_t size) {
                 split->size = curr->size - size - sizeof(Block);
                 split->is_free = 1;
                 split->next = curr->next;
+                split->prev = curr;
+                if (curr->next) curr->next->prev = split;
                 
                 curr->size = size;
                 curr->next = split;
@@ -104,19 +66,50 @@ void *my_malloc(size_t size) {
 
     block->is_free = 0;
 
+    Block *new_tail = block;
     if (mmap_size >= total + sizeof(Block) + 8) {
         block->size = size;
         Block *split = (Block *)((char *)block + total);
         split->size = mmap_size - total - sizeof(Block);
         split->is_free = 1;
-        split->next = head;
+        split->next = NULL;
+        split->prev = block;
         
         block->next = split;
-        head = block;
+        new_tail = split;
     } else {
         block->size = mmap_size - sizeof(Block);
-        block->next = head;
+        block->next = NULL;
+    }
+
+    // Insert the new chunk [block ... new_tail] into the doubly-linked list in memory-address order
+    if (!head) {
+        block->prev = NULL;
         head = block;
+    } else if ((char *)block < (char *)head) {
+        new_tail->next = head;
+        head->prev = new_tail;
+        block->prev = NULL;
+        head = block;
+    } else {
+        Block *pos = head;
+        while (pos->next && (char *)pos->next < (char *)block) {
+            pos = pos->next;
+        }
+        // Insert after pos
+        new_tail->next = pos->next;
+        if (pos->next) pos->next->prev = new_tail;
+        pos->next = block;
+        block->prev = pos;
+    }
+    
+    // Check if new_tail (if free) can coalesce with the block right after it
+    // (This handles the rare case where mmap returns a contiguous region to an existing block)
+    if (new_tail->is_free && new_tail->next && new_tail->next->is_free &&
+        (char *)new_tail + sizeof(Block) + new_tail->size == (char *)new_tail->next) {
+        new_tail->size += sizeof(Block) + new_tail->next->size;
+        new_tail->next = new_tail->next->next;
+        if (new_tail->next) new_tail->next->prev = new_tail;
     }
 
     return (char *)block + sizeof(Block);
@@ -126,7 +119,37 @@ void my_free(void *ptr) {
     if (!ptr) return;
     Block *block = (Block *)((char *)ptr - sizeof(Block));
     block->is_free = 1;
-    coalesce(); // Keep the list clean
+    
+    // O(1) coalesce with next
+    if (block->next && block->next->is_free && 
+        (char *)block + sizeof(Block) + block->size == (char *)block->next) {
+        block->size += sizeof(Block) + block->next->size;
+        block->next = block->next->next;
+        if (block->next) block->next->prev = block;
+    }
+    
+    // O(1) coalesce with prev
+    if (block->prev && block->prev->is_free && 
+        (char *)block->prev + sizeof(Block) + block->prev->size == (char *)block) {
+        block->prev->size += sizeof(Block) + block->size;
+        block->prev->next = block->next;
+        if (block->next) block->next->prev = block->prev;
+        block = block->prev;
+    }
+    
+    // High-water mark release via munmap
+    // If block is completely isolated (no contiguous neighbors), it's a full mmap region
+    int isolated_start = (!block->prev || (char *)block->prev + sizeof(Block) + block->prev->size != (char *)block);
+    int isolated_end = (!block->next || (char *)block + sizeof(Block) + block->size != (char *)block->next);
+    
+    // Free back to OS if it's an entire mmap region and reasonably large (>= 64KB)
+    if (isolated_start && isolated_end && (block->size + sizeof(Block)) >= 65536) {
+        if (block->prev) block->prev->next = block->next;
+        if (block->next) block->next->prev = block->prev;
+        if (head == block) head = block->next;
+        
+        munmap(block, block->size + sizeof(Block));
+    }
 }
 
 void my_print(const char *str) {
