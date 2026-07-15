@@ -17,6 +17,7 @@
  */
 
 #include <stdio.h>
+#include <time.h>
 #include "alloc.h"
 #include <stdlib.h>
 #include <unistd.h>
@@ -276,11 +277,45 @@ int main(int argc, char **argv) {
     }
 
     char buf[4096];
+    struct timespec last_scroll_time = {0};
 
     while (1) {
-        if (poll(fds, nfds, -1) < 0) {
+        int timeout = -1;
+        if (g_select_dragging) {
+            timeout = 100;
+        }
+
+        if (poll(fds, nfds, timeout) < 0) {
             if (errno == EINTR) continue;
             break;
+        }
+
+        if (g_select_dragging) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed_ms = (now.tv_sec - last_scroll_time.tv_sec) * 1000 + 
+                              (now.tv_nsec - last_scroll_time.tv_nsec) / 1000000;
+            if (elapsed_ms >= 100) {
+                int scrolled = 0;
+                if (last_mouse_row <= 0) {
+                    term_scroll(1);
+                    scrolled = 1;
+                } else if (last_mouse_row >= vt_state.rows - 1) {
+                    term_scroll(-1);
+                    scrolled = 1;
+                }
+                
+                if (scrolled) {
+                    g_select_active = 1;
+                    int col = last_mouse_col;
+                    if (col < 0) col = 0;
+                    if (col >= vt_state.cols) col = vt_state.cols - 1;
+                    g_select_end_col = col;
+                    g_select_end_row = last_mouse_row - vt_state.scroll_offset;
+                    needs_render = 1;
+                }
+                last_scroll_time = now;
+            }
         }
 
         if (fds[1].revents & POLLIN) {

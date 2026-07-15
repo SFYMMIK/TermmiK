@@ -21,6 +21,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/keysym.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <X11/extensions/XShm.h>
@@ -160,6 +161,23 @@ static int x11_poll_events(void) {
                     x11_get_clipboard();
                     continue;
                 }
+            }
+
+            if (keysym == XK_BackSpace) {
+                chars[0] = '\x7f';
+                len = 1;
+            } else if (keysym == XK_Up) {
+                strcpy(chars, "\033[A");
+                len = 3;
+            } else if (keysym == XK_Down) {
+                strcpy(chars, "\033[B");
+                len = 3;
+            } else if (keysym == XK_Right) {
+                strcpy(chars, "\033[C");
+                len = 3;
+            } else if (keysym == XK_Left) {
+                strcpy(chars, "\033[D");
+                len = 3;
             }
 
             if (len > 0) {

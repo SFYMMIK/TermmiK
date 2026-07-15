@@ -253,6 +253,7 @@ static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t s
         else if (sym == XKB_KEY_Down) { strcpy(buf, "\033[B"); len = 3; }
         else if (sym == XKB_KEY_Right) { strcpy(buf, "\033[C"); len = 3; }
         else if (sym == XKB_KEY_Left) { strcpy(buf, "\033[D"); len = 3; }
+        else if (sym == XKB_KEY_BackSpace) { buf[0] = '\x7f'; len = 1; }
         else {
             len = xkb_state_key_get_utf8(xkb_state, key + 8, buf, sizeof(buf));
             
