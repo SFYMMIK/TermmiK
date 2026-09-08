@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=TermmiK
+GenericName=Terminal
+Comment=A custom lightweight C-based terminal emulator
+Exec=termmik
+Icon=termmik
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;console;terminal;
+StartupWMClass=TermmiK
+StartupNotify=true

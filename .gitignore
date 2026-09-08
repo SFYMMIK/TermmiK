@@ -1,0 +1,14 @@
+# Build directories and files
+build/
+*.o
+
+# Executables
+TermmiK
+
+# Local test harnesses (not shipped with the repo)
+tests/
+
+# Temporary and swap files
+*.swp
+*~
+.DS_Store
