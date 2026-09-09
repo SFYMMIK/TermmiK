@@ -34,8 +34,7 @@ typedef struct {
     float opacity;
     uint32_t cursor_color;
     int cursor_shape; // 0=block, 1=underline, 2=bar
-    int cursor_blink;           // 0/1
-    int cursor_blink_interval;  // milliseconds
+    int cursor_blink; // 0=hidden, 1=blinking, 2=steady always visible
     int cursor_trail;           // 0/1 — animated cursor trail on cursor jumps
     int scrollback_lines;
     int mouse_scroll_step;

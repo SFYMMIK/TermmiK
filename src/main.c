@@ -36,6 +36,7 @@ int g_height = 24 * 18;
 uint32_t *g_framebuffer = NULL;
 
 #define TRAIL_FRAME_MS 12 // ~80fps while the cursor trail animates
+#define CURSOR_BLINK_INTERVAL_MS 300 // fixed blink cadence
 
 int g_pty_fd = -1;
 static VTState vt_state;
@@ -452,8 +453,8 @@ int main(int argc, char **argv) {
         int timeout = -1;
         if (g_select_dragging) {
             timeout = 100;
-        } else if (g_config.cursor_blink) {
-            timeout = (g_config.cursor_blink_interval > 0) ? g_config.cursor_blink_interval : 300;
+        } else if (g_config.cursor_blink == 1) {
+            timeout = CURSOR_BLINK_INTERVAL_MS;
         }
         // Wake up when the visual bell flash should end
         if (g_bell_flash_until) {
@@ -479,7 +480,7 @@ int main(int argc, char **argv) {
         if (poll_result == 0) {
             if (cursor_trail_active()) {
                 needs_render = 1; // animation frame
-            } else if (g_config.cursor_blink && !g_select_dragging) {
+            } else if (g_config.cursor_blink == 1 && !g_select_dragging) {
                 // Stop blinking (solid cursor) after cursor_stop_blinking_after
                 float stop_after = g_config.cursor_stop_blinking_after;
                 int64_t idle = bell_now_ms() - last_activity_ms;
@@ -496,7 +497,7 @@ int main(int argc, char **argv) {
         } else {
             last_activity_ms = bell_now_ms();
             // Any activity keeps the cursor solid and resets the phase
-            if (g_config.cursor_blink && !g_cursor_blink_on) {
+            if (g_config.cursor_blink == 1 && !g_cursor_blink_on) {
                 g_cursor_blink_on = 1;
                 needs_render = 1;
             }

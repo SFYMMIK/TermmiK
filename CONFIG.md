@@ -81,9 +81,8 @@ The image is composited into the background, so **window transparency keeps work
 ### Visuals
 - `opacity` (float): The transparency of the terminal background, from `0.0` (fully transparent) to `1.0` (fully opaque). Defaults to `1.0`. Native hardware-accelerated transparency is applied only to the background, keeping text fully opaque.
 - `cursor_shape` (int): The shape of the cursor. `0` block (`█`), `1` underline (`▁`), `2` bar (`|`). Defaults to `0`. (Applications can also change it at runtime via `DECSCUSR`.)
-- `cursor_blink` (int): `1` makes the cursor blink while the terminal is idle. Any input resets it to solid. Defaults to `0`.
-- `cursor_blink_interval` (int): Blink period in milliseconds. Defaults to `300`.
-- `cursor_trail` (int): `1` enables an animated cursor trail — when the cursor jumps (prompt redraws, vim motions...), the block glides to its new position with an ease-out curve and a fading smear, carrying the character under it. Only applies to the block cursor. Defaults to `0`.
+- `cursor_blink` (int): `0` — no cursor at all. `1` — the cursor blinks while the terminal is idle (fixed 300ms cadence); any input makes it solid. `2` — a steady, non-blinking cursor that is always visible. Defaults to `2`.
+- `cursor_trail` (int): `1` enables an animated cursor trail — when the cursor jumps (prompt redraws, vim motions...), it glides to its new position with an ease-out curve and a fading trail, carrying the character under it (block shape only). Works with all three cursor shapes. Defaults to `0`.
 
 ### Colors
 Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.

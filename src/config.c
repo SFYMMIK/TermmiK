@@ -128,8 +128,7 @@ void config_load(void) {
     g_config.opacity = 1.0f;
     g_config.cursor_color = 0xFFFFFF;
     g_config.cursor_shape = 0;
-    g_config.cursor_blink = 0;
-    g_config.cursor_blink_interval = 300;
+    g_config.cursor_blink = 2;
     g_config.cursor_trail = 0;
     g_config.scrollback_lines = 10000;
     g_config.mouse_scroll_step = 3;
@@ -247,7 +246,12 @@ void config_load(void) {
             } else if (starts_with(k, "cursor_shape", key_len)) {
                 g_config.cursor_shape = parse_int(v, val_len);
             } else if (starts_with(k, "cursor_blink_interval", key_len)) {
-                g_config.cursor_blink_interval = parse_int(v, val_len);
+                // Removed option — warn so old configs don't wonder
+                char msg[128];
+                snprintf(msg, sizeof(msg),
+                         "TermmiK: config line %d: cursor_blink_interval was removed "
+                         "(fixed 300ms blink); use cursor_blink 0/1/2 instead\n", line_no);
+                my_print(msg);
             } else if (starts_with(k, "cursor_blink", key_len)) {
                 g_config.cursor_blink = parse_int(v, val_len);
             } else if (starts_with(k, "cursor_trail", key_len)) {

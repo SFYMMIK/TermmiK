@@ -598,6 +598,26 @@ static void blend_rect(uint32_t *fb, int x0, int y0, int x1, int y1, uint32_t co
     }
 }
 
+// Draw the configured cursor shape (block/underline/bar) at a pixel position.
+// alpha 255 = solid, lower = translucent (trail ghosts).
+static void draw_cursor_shape_at(int px, int py, uint32_t color, uint32_t alpha) {
+    if (g_config.cursor_shape == 1) {
+        // Underline: strip along the bottom of the cell
+        int uy = py + g_cell_height - 2;
+        if (uy < py) uy = py;
+        if (alpha >= 255) fill_solid_rect(g_framebuffer, px, uy, px + g_cell_width, uy + 2, color | 0xFF000000);
+        else blend_rect(g_framebuffer, px, uy, px + g_cell_width, uy + 2, color, alpha);
+    } else if (g_config.cursor_shape == 2) {
+        // Bar: strip along the left edge of the cell
+        if (alpha >= 255) fill_solid_rect(g_framebuffer, px, py, px + 2, py + g_cell_height, color | 0xFF000000);
+        else blend_rect(g_framebuffer, px, py, px + 2, py + g_cell_height, color, alpha);
+    } else {
+        // Block: the whole cell
+        if (alpha >= 255) fill_solid_rect(g_framebuffer, px, py, px + g_cell_width, py + g_cell_height, color | 0xFF000000);
+        else blend_rect(g_framebuffer, px, py, px + g_cell_width, py + g_cell_height, color, alpha);
+    }
+}
+
 // Blit a cached glyph at an arbitrary pixel position (used by the trail so
 // the character rides the cursor)
 static void blit_glyph_at(const Glyph *b, int base_x, int base_y, uint32_t fg) {
@@ -719,9 +739,13 @@ void render_draw(VTState *state) {
     uint32_t *g_framebuffer = shadow_buffer;
 
     // Cursor trail: detect a cursor jump and (re)start the glide animation
-    int cursor_shown_now = state->cursor_visible &&
-                           (!g_config.cursor_blink || g_cursor_blink_on);
-    int trail_on = g_config.cursor_trail && g_config.cursor_shape == 0 &&
+    // cursor_blink tri-state: 0 = no cursor at all, 1 = blinking (respects
+    // the application's ?25 visibility), 2 = steady and always visible.
+    int cursor_shown_now;
+    if (g_config.cursor_blink == 0) cursor_shown_now = 0;
+    else if (g_config.cursor_blink == 2) cursor_shown_now = 1;
+    else cursor_shown_now = state->cursor_visible && g_cursor_blink_on;
+    int trail_on = g_config.cursor_trail &&
                    state->scroll_offset == 0 && cursor_shown_now;
     if (state->cursor_x != last_cursor_x || state->cursor_y != last_cursor_y) {
         if (trail_on && last_cursor_x >= 0) {
@@ -831,8 +855,10 @@ void render_draw(VTState *state) {
             }
             
             extern int g_cursor_blink_on;
-            int cursor_shown = state->cursor_visible &&
-                               (!g_config.cursor_blink || g_cursor_blink_on);
+            int cursor_shown;
+            if (g_config.cursor_blink == 0) cursor_shown = 0;
+            else if (g_config.cursor_blink == 2) cursor_shown = 1;
+            else cursor_shown = state->cursor_visible && g_cursor_blink_on;
             int is_cursor = (cursor_shown && logical_y == state->cursor_y && x == state->cursor_x);
             if (trail_now) is_cursor = 0; // the animated block replaces it
             if (is_cursor && g_config.cursor_shape == 0) {
@@ -997,7 +1023,7 @@ void render_draw(VTState *state) {
         }
     }
     
-    // Animated cursor trail: glide block + fading smear + riding glyph
+    // Animated cursor trail: glide cursor + fading trail + riding glyph
     if (trail_now) {
         float t = (bell_now_ms() - trail_start) / (float)(trail_end - trail_start);
         if (t < 0) t = 0;
@@ -1011,31 +1037,43 @@ void render_draw(VTState *state) {
             int py = g_config.padding_top + (int)(ay * g_cell_height);
             int fx = g_config.padding_left + (int)(trail_from_x * g_cell_width);
             int fy = g_config.padding_top + (int)(trail_from_y * g_cell_height);
+            uint32_t cc = g_config.cursor_color;
 
-            // Fading smear from the origin cell to the current position
             int tail_alpha = (int)(110 * (1 - e));
             if (tail_alpha > 0) {
-                int x0 = px < fx ? px : fx;
-                int y0 = py < fy ? py : fy;
-                int x1 = (px > fx ? px : fx) + g_cell_width;
-                int y1 = (py > fy ? py : fy) + g_cell_height;
-                blend_rect(g_framebuffer, x0, y0, x1, y1, g_config.cursor_color, tail_alpha);
+                if (g_config.cursor_shape == 0) {
+                    // Block: one smeared bounding box from origin to here
+                    int x0 = px < fx ? px : fx;
+                    int y0 = py < fy ? py : fy;
+                    int x1 = (px > fx ? px : fx) + g_cell_width;
+                    int y1 = (py > fy ? py : fy) + g_cell_height;
+                    blend_rect(g_framebuffer, x0, y0, x1, y1, cc, tail_alpha);
+                } else {
+                    // Underline / bar: fading ghost copies along the path
+                    for (int gi = 1; gi <= 2; gi++) {
+                        float gt = e * gi / 3.0f;
+                        int gx = fx + (int)((px - fx) * gt);
+                        int gy = fy + (int)((py - fy) * gt);
+                        draw_cursor_shape_at(gx, gy, cc, (uint32_t)(tail_alpha * (3 - gi) / 3));
+                    }
+                }
             }
 
-            // The cursor block itself
-            fill_solid_rect(g_framebuffer, px, py, px + g_cell_width, py + g_cell_height,
-                            g_config.cursor_color | 0xFF000000);
+            // The moving cursor itself
+            draw_cursor_shape_at(px, py, cc, 255);
 
-            // The destination character rides the cursor
-            Cell cc = state->cells[state->cursor_y * state->cols + state->cursor_x];
-            if (!(cc.attrs & (CELL_WIDE | CELL_TRAIL)) &&
-                cc.char_code >= 32 && cc.char_code < GLYPH_CACHE_SIZE) {
-                Glyph *b = &g_glyph_cache[cc.char_code];
-                if (b->bitmap && b->w > 1) {
-                    uint32_t textfg = g_config.cursor_text_color_set
-                                          ? g_config.cursor_text_color
-                                          : cc.bg_color;
-                    blit_glyph_at(b, px, py, textfg);
+            // The destination character rides the cursor (block only)
+            if (g_config.cursor_shape == 0) {
+                Cell cc2 = state->cells[state->cursor_y * state->cols + state->cursor_x];
+                if (!(cc2.attrs & (CELL_WIDE | CELL_TRAIL)) &&
+                    cc2.char_code >= 32 && cc2.char_code < GLYPH_CACHE_SIZE) {
+                    Glyph *b = &g_glyph_cache[cc2.char_code];
+                    if (b->bitmap && b->w > 1) {
+                        uint32_t textfg = g_config.cursor_text_color_set
+                                              ? g_config.cursor_text_color
+                                              : cc2.bg_color;
+                        blit_glyph_at(b, px, py, textfg);
+                    }
                 }
             }
         }

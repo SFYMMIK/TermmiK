@@ -5,9 +5,6 @@ build/
 # Executables
 TermmiK
 
-# Local test harnesses (not shipped with the repo)
-tests/
-
 # Temporary and swap files
 *.swp
 *~

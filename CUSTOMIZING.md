@@ -33,14 +33,13 @@ Fonts are rasterized in-process (`stb_truetype`) — no fontconfig rendering sta
 # Shape: 0 = block (█), 1 = underline (▁), 2 = bar (|)
 cursor_shape=2
 
-# Blink cadence while idle (milliseconds); any input makes it solid
+# 0 = no cursor at all, 1 = blinking (fixed 300ms cadence), 2 = steady
 cursor_blink=1
-cursor_blink_interval=150
 
-# Stop blinking after N seconds of idleness (kitty behavior)
+# While blinking: go solid after N seconds of idleness
 cursor_stop_blinking_after=15
 
-# Animated trail: the block glides to its new position with a fading smear
+# Animated trail: the cursor glides to its new position with a fading trail
 cursor_trail=1
 
 # Text color under a block cursor (otherwise inverted)

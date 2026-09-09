@@ -45,22 +45,6 @@ ICON_SIZES = 16 24 32 48 64 128 256 512
 
 all: build_dir $(EXEC)
 
-# VT parser test harness (no display needed)
-test: build_dir build/test_parser.o build/vt_parser.o build/config.o build/alloc.o
-	$(CC) build/test_parser.o build/vt_parser.o build/config.o build/alloc.o -o build/test_parser -lm
-	./build/test_parser
-
-# Integration test: run real TUI apps through the parser on a PTY
-test-apps: build_dir build/test_apps.o build/vt_parser.o build/config.o build/alloc.o
-	$(CC) build/test_apps.o build/vt_parser.o build/config.o build/alloc.o -o build/test_apps -lm
-	./build/test_apps
-
-build/test_parser.o: tests/test_parser.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-build/test_apps.o: tests/test_apps.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
 build_dir:
 	mkdir -p build
 
@@ -91,4 +75,4 @@ uninstall:
 		rm -f $(DESTDIR)$(ICONDIR)/$${size}x$${size}/apps/termmik.png; \
 	done
 
-.PHONY: all build_dir clean install uninstall test
+.PHONY: all build_dir clean install uninstall
