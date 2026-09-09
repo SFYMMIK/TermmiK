@@ -36,6 +36,7 @@ typedef struct {
     int cursor_shape; // 0=block, 1=underline, 2=bar
     int cursor_blink;           // 0/1
     int cursor_blink_interval;  // milliseconds
+    int cursor_trail;           // 0/1 — animated cursor trail on cursor jumps
     int scrollback_lines;
     int mouse_scroll_step;
     int selection_fg_set;
@@ -48,6 +49,18 @@ typedef struct {
     char background_image[512];
     float background_image_opacity; // blend of image over the background color
     int background_image_mode;      // 0=stretch, 1=center, 2=tile
+
+    // Kitty-style extras
+    char shell[128];            // command to spawn (empty = $SHELL)
+    char env_vars[32][256];     // NAME=VALUE pairs exported to the child
+    int num_env_vars;
+    int cursor_text_color_set;
+    uint32_t cursor_text_color; // text color under a block cursor
+    int visual_bell_duration;   // ms of screen flash on BEL (0 = off)
+    float cursor_stop_blinking_after; // seconds of idleness before blink stops
+    int adjust_line_height;     // pixel deltas applied to the cell metrics
+    int adjust_column_width;
+    int adjust_baseline;
 } TermConfig;
 
 extern TermConfig g_config;

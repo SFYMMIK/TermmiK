@@ -8,7 +8,7 @@ Written purely in C, TermmiK leverages zero-bloat graphics protocols and avoids 
 
 - **Extreme Memory Efficiency**: Bypasses heavy UI rendering libraries (like Pango, Cairo, or GTK) in favor of raw framebuffer manipulation — full features without the framework tax.
 - **Tiny, Fast Binary**: Compiled with Link-Time Optimization (LTO) and aggressive space-saving flags, resulting in a small executable that launches instantly.
-- **Maximally Customizable**: Fonts, per-side margins (asymmetric padding), opacity, cursor shape and blink, selection colors, scroll step, image backgrounds, `TERM` override, initial window scale and more — all through a simple config file with line-numbered diagnostics when something's wrong, no recompiling.
+- **Maximally Customizable**: Kitty-grade config surface — fonts with spacing adjustments, per-side margins (asymmetric padding), opacity, cursor shape/blink/text color, selection colors, visual bell, scroll step, image backgrounds, custom shell and environment, `TERM` override, initial window scale and more — all through a simple config file with line-numbered diagnostics when something's wrong, no recompiling.
 - **Native Wayland & X11 Support**: Supports both major Linux display protocols natively without translation layers.
 - **Native Clipboard & Selection**: Fully integrated, bloat-free Wayland (`wl_data_device`) and X11 clipboard sharing. Highlight text with your mouse and use `Ctrl+Shift+C` / `Ctrl+Shift+V` without relying on external tools like `xclip` or `wl-clipboard`. Applications can also write to the clipboard directly via `OSC 52` (tmux, nvim, opencode...), and clipboard reads negotiate the best MIME type the source offers.
 - **Bracketed Paste & TUI-Ready Input**: Pastes are wrapped in bracketed-paste markers (`?2004`) when the running program requests it, so multi-line pastes land safely in shells and TUI apps. Full xterm-style key encoding for arrows, Home/End, Insert/Delete, PageUp/PageDown, `F1`–`F12`, `Shift+Tab`, and Ctrl/Alt/Shift modifier combos, including application cursor key mode (`DECCKM`) and focus reporting (`?1004`).
@@ -19,6 +19,7 @@ Written purely in C, TermmiK leverages zero-bloat graphics protocols and avoids 
 - **Hardware-Accelerated Transparency**: Supports perfectly smooth, per-pixel alpha blending for terminal backgrounds on both Wayland and X11 without fading the text.
 - **Image Backgrounds**: Render any PNG/JPEG as your terminal background — stretched (bilinear), centered or tiled — blended over the background color and fully compositing with window transparency and OSC color changes.
 - **Gamma-Corrected Subpixel Emulation**: Achieves bold, crisp text rendering comparable to Freetype, but without the massive memory overhead, via mathematically optimized `stb_truetype` alpha blending.
+- **Animated Cursor Trail**: An optional kitty-style cursor animation — the block glides to its new position with an ease-out curve, a fading smear, and the character riding along, all rendered natively with zero extra cost when idle.
 - **Seamless Line Art**: All 128 Box Drawing characters (single, double, heavy, mixed, rounded, dashed and diagonals), Block Elements (`█▀▄░▒▓`...) and DEC scan lines are synthesized procedurally to span the full cell, so TUI frames and logos (opencode, htop, lazygit...) render perfectly connected with zero gaps — no font dependency.
 - **Dynamic Resizing**: Seamless window reflowing and recalculations on resize events with zero visual artifacts.
 - **Kitty Graphics Protocol Support**: Fully supports displaying high-resolution images inline via the Kitty image protocol. Handles compressed pixel data (`o=z`), chunked data transfers (`m=1`), and precise cursor-aligned image positioning, making tools like `icat` and `fastfetch` render beautifully.
@@ -27,6 +28,10 @@ Written purely in C, TermmiK leverages zero-bloat graphics protocols and avoids 
 ## Build Configurations
 
 For detailed instructions on compiling the terminal from source, installing dependencies, and applying size-optimizing compiler flags, please see [BUILD.md](./BUILD.md).
+
+## Customizing
+
+Head to [CUSTOMIZING.md](./CUSTOMIZING.md) for a guided tour of everything you can tweak — with ready-to-copy example configs — or [CONFIG.md](./CONFIG.md) for the full option reference.
 
 
 

@@ -62,6 +62,7 @@ WindowBackend* get_wayland_backend();
 // Callbacks that the backend will invoke
 void term_resize(int width, int height);
 void term_send_input(const char *buf, int len);
+void term_clear_selection(void); // dismiss the current text selection
 void term_scroll(int offset);
 
 // Shared input helpers implemented in main.c

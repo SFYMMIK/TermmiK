@@ -35,6 +35,8 @@ int g_width = 80 * 9;
 int g_height = 24 * 18;
 uint32_t *g_framebuffer = NULL;
 
+#define TRAIL_FRAME_MS 12 // ~80fps while the cursor trail animates
+
 int g_pty_fd = -1;
 static VTState vt_state;
 static int needs_render = 1;
@@ -51,7 +53,22 @@ int g_select_end_col = 0;
 // Cursor blink phase (toggled on idle by the main loop, reset on activity)
 int g_cursor_blink_on = 1;
 
+// Visual bell flash window (monotonic ms; 0 = no flash)
+int64_t g_bell_flash_until = 0;
+int64_t g_bell_flash_start = 0;
+
+extern int64_t bell_now_ms(void);
+
 void term_copy(void);
+
+// BEL received from the child — flash the screen if configured
+void term_bell(void) {
+    if (g_config.visual_bell_duration > 0) {
+        g_bell_flash_start = bell_now_ms();
+        g_bell_flash_until = g_bell_flash_start + g_config.visual_bell_duration;
+    }
+    needs_render = 1;
+}
 
 void term_resize(int width, int height) {
     if (!vt_initialized) return;
@@ -66,6 +83,14 @@ void term_resize(int width, int height) {
         pty_resize(g_pty_fd, new_rows, new_cols);
     }
     needs_render = 1;
+}
+
+// Selection is dismissed by typing, like kitty and other terminals
+void term_clear_selection(void) {
+    if (g_select_active) {
+        g_select_active = 0;
+        needs_render = 1;
+    }
 }
 
 void term_send_input(const char *buf, int len) {
@@ -240,6 +265,12 @@ void term_mouse_motion(int x, int y) {
     }
 
     if (g_select_dragging) {
+        // Drag threshold: a selection only starts once the mouse leaves the
+        // cell it was pressed in — a plain click (or jitter) never selects.
+        if (!g_select_active && col == g_select_start_col &&
+            row - vt_state.scroll_offset == g_select_start_row) {
+            return;
+        }
         g_select_active = 1;
         if (col < 0) col = 0;
         if (col >= vt_state.cols) col = vt_state.cols - 1;
@@ -415,6 +446,7 @@ int main(int argc, char **argv) {
 
     char buf[4096];
     struct timespec last_scroll_time = {0};
+    int64_t last_activity_ms = 0;
 
     while (1) {
         int timeout = -1;
@@ -422,6 +454,20 @@ int main(int argc, char **argv) {
             timeout = 100;
         } else if (g_config.cursor_blink) {
             timeout = (g_config.cursor_blink_interval > 0) ? g_config.cursor_blink_interval : 300;
+        }
+        // Wake up when the visual bell flash should end
+        if (g_bell_flash_until) {
+            int64_t rem = g_bell_flash_until - bell_now_ms();
+            if (rem <= 0) {
+                g_bell_flash_until = 0;
+                needs_render = 1;
+            } else if (timeout < 0 || rem < timeout) {
+                timeout = (rem < 1) ? 1 : (int)rem;
+            }
+        }
+        // Keep ticking frames while the cursor trail animates
+        if (cursor_trail_active() && (timeout < 0 || timeout > TRAIL_FRAME_MS)) {
+            timeout = TRAIL_FRAME_MS;
         }
 
         int poll_result = poll(fds, nfds, timeout);
@@ -431,12 +477,24 @@ int main(int argc, char **argv) {
         }
 
         if (poll_result == 0) {
-            // Idle timeout
-            if (g_config.cursor_blink && !g_select_dragging) {
-                g_cursor_blink_on = !g_cursor_blink_on;
-                needs_render = 1;
+            if (cursor_trail_active()) {
+                needs_render = 1; // animation frame
+            } else if (g_config.cursor_blink && !g_select_dragging) {
+                // Stop blinking (solid cursor) after cursor_stop_blinking_after
+                float stop_after = g_config.cursor_stop_blinking_after;
+                int64_t idle = bell_now_ms() - last_activity_ms;
+                if (stop_after > 0 && idle >= (int64_t)(stop_after * 1000.0f)) {
+                    if (!g_cursor_blink_on) {
+                        g_cursor_blink_on = 1;
+                        needs_render = 1;
+                    }
+                } else {
+                    g_cursor_blink_on = !g_cursor_blink_on;
+                    needs_render = 1;
+                }
             }
         } else {
+            last_activity_ms = bell_now_ms();
             // Any activity keeps the cursor solid and resets the phase
             if (g_config.cursor_blink && !g_cursor_blink_on) {
                 g_cursor_blink_on = 1;

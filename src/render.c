@@ -29,7 +29,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 #include <math.h>
+
+// Exact integer division by 255 for v in [0, 65025] (v/255 == (v+1)*257 >> 16).
+// The blend loops below run per pixel per frame — this saves a real division.
+static inline uint32_t div255(uint32_t v) { return (v + 1) * 257 >> 16; }
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
@@ -51,6 +56,13 @@ static int bg_bw = 0, bg_bh = 0;
 static int bg_dirty = 1;
 
 void render_invalidate_background(void) { bg_dirty = 1; }
+
+// Monotonic milliseconds — shared by the visual bell timing
+int64_t bell_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 // Bilinear sample of the source image, u/v in [0,1)
 static uint32_t sample_bg_image(float u, float v) {
@@ -92,9 +104,9 @@ static void build_background(int w, int h) {
     uint32_t base_g = (g_config.bg_color >> 8) & 0xFF;
     uint32_t base_b = g_config.bg_color & 0xFF;
     uint32_t plain = (alpha << 24) |
-                     ((base_r * alpha) / 255 << 16) |
-                     ((base_g * alpha) / 255 << 8) |
-                     ((base_b * alpha) / 255);
+                     (div255(base_r * alpha) << 16) |
+                     (div255(base_g * alpha) << 8) |
+                     (div255(base_b * alpha));
 
     if (!bg_src) {
         for (int i = 0; i < w * h; i++) bg_buffer[i] = plain;
@@ -131,9 +143,9 @@ static void build_background(int w, int h) {
             uint32_t cg = (uint32_t)((1.0f - mix) * base_g + mix * ((px >> 8) & 0xFF));
             uint32_t cb = (uint32_t)((1.0f - mix) * base_b + mix * (px & 0xFF));
             bg_buffer[y * w + x] = (alpha << 24) |
-                                   ((cr * alpha) / 255 << 16) |
-                                   ((cg * alpha) / 255 << 8) |
-                                   ((cb * alpha) / 255);
+                                   (div255(cr * alpha) << 16) |
+                                   (div255(cg * alpha) << 8) |
+                                   (div255(cb * alpha));
         }
     }
 }
@@ -141,7 +153,6 @@ static void build_background(int w, int h) {
 typedef struct {
     unsigned char *bitmap;
     int w, h, xoff, yoff;
-    int advance;
 } Glyph;
 
 #define GLYPH_CACHE_SIZE 65536
@@ -152,6 +163,7 @@ static stbtt_fontinfo g_fonts[MAX_FONTS];
 static float g_font_scales[MAX_FONTS];
 static int g_num_fonts = 0;
 static unsigned char gamma_table[256];
+
 
 static void* map_font(const char *path) {
     int fd = open(path, O_RDONLY);
@@ -210,6 +222,14 @@ int render_init(const char *font_pattern) {
         if (g_cell_width < 1) g_cell_width = 9;
     }
 
+    // Kitty-style cell metric tuning
+    g_cell_width += g_config.adjust_column_width;
+    g_cell_height += g_config.adjust_line_height;
+    g_baseline += g_config.adjust_baseline;
+    if (g_cell_width < 1) g_cell_width = 1;
+    if (g_cell_height < 1) g_cell_height = 1;
+    if (g_baseline < 1) g_baseline = 1;
+
     // Load the configured background image (kept for the process lifetime)
     if (g_config.background_image[0]) {
         int w, h, n;
@@ -229,6 +249,7 @@ extern int g_select_start_row;
 extern int g_select_start_col;
 extern int g_select_end_row;
 extern int g_select_end_col;
+extern int g_cursor_blink_on; // cursor blink phase (main.c)
 
 // ---------------------------------------------------------------------------
 // Wide (CJK/emoji) glyph cache — open-addressing hash, allocated lazily so we
@@ -269,7 +290,7 @@ static Glyph *wide_glyph_lookup(uint32_t cp) {
             s->cp = cp;
             s->used = 1;
             s->g.bitmap = bitmap;
-            s->g.w = w; s->g.h = h2; s->g.xoff = xoff; s->g.yoff = yoff; s->g.advance = 0;
+            s->g.w = w; s->g.h = h2; s->g.xoff = xoff; s->g.yoff = yoff;
             return &s->g;
         }
         if (s->cp == cp) return &s->g;
@@ -532,6 +553,75 @@ static void synth_glyph(uint32_t cp, unsigned char *bm, int w, int h) {
 }
 
 
+// ---------------------------------------------------------------------------
+// Animated cursor trail (kitty-style): when the logical cursor jumps, the
+// block cursor glides from its previous position to the new one with an
+// ease-out curve, leaving a fading smear. Purely cosmetic — render_draw
+// detects the move, the main loop ticks frames at ~80 fps while active.
+// ---------------------------------------------------------------------------
+#define TRAIL_DURATION_MS 60
+
+static int trail_active = 0;
+static int64_t trail_start = 0, trail_end = 0;
+static float trail_from_x = 0, trail_from_y = 0; // cell coords (float)
+static float trail_to_x = 0, trail_to_y = 0;
+static int last_cursor_x = -1, last_cursor_y = -1;
+
+int cursor_trail_active(void) { return trail_active; }
+
+static void fill_solid_rect(uint32_t *fb, int x0, int y0, int x1, int y1, uint32_t color) {
+    for (int y = y0; y < y1; y++) {
+        if (y < 0 || y >= g_height) continue;
+        for (int x = x0; x < x1; x++) {
+            if (x < 0 || x >= g_width) continue;
+            fb[y * g_width + x] = color;
+        }
+    }
+}
+
+static void blend_rect(uint32_t *fb, int x0, int y0, int x1, int y1, uint32_t color, uint32_t alpha) {
+    if (alpha == 0) return;
+    uint32_t r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = color & 0xFF;
+    for (int y = y0; y < y1; y++) {
+        if (y < 0 || y >= g_height) continue;
+        for (int x = x0; x < x1; x++) {
+            if (x < 0 || x >= g_width) continue;
+            uint32_t px = fb[y * g_width + x];
+            uint32_t dr = (px >> 16) & 0xFF, dg = (px >> 8) & 0xFF, db = px & 0xFF;
+            uint32_t da = (px >> 24) & 0xFF;
+            uint32_t orr = div255(r * alpha + dr * (255 - alpha));
+            uint32_t og = div255(g * alpha + dg * (255 - alpha));
+            uint32_t ob = div255(b * alpha + db * (255 - alpha));
+            uint32_t oa = alpha + div255(da * (255 - alpha));
+            fb[y * g_width + x] = (oa << 24) | (orr << 16) | (og << 8) | ob;
+        }
+    }
+}
+
+// Blit a cached glyph at an arbitrary pixel position (used by the trail so
+// the character rides the cursor)
+static void blit_glyph_at(const Glyph *b, int base_x, int base_y, uint32_t fg) {
+    int yoff = b->yoff + g_baseline;
+    uint32_t fr = (fg >> 16) & 0xFF, fgc = (fg >> 8) & 0xFF, fb2 = fg & 0xFF;
+    for (int cy = 0; cy < b->h; cy++) {
+        for (int cx = 0; cx < b->w; cx++) {
+            unsigned char a = gamma_table[b->bitmap[cy * b->w + cx]];
+            if (!a) continue;
+            int sx = base_x + b->xoff + cx;
+            int sy = base_y + yoff + cy;
+            if (sx < 0 || sx >= g_width || sy < 0 || sy >= g_height) continue;
+            uint32_t dst = g_framebuffer[sy * g_width + sx];
+            uint32_t dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
+            uint32_t da = (dst >> 24) & 0xFF;
+            uint32_t orr = div255(fr * a + dr * (255 - a));
+            uint32_t og = div255(fgc * a + dg * (255 - a));
+            uint32_t ob = div255(fb2 * a + db * (255 - a));
+            uint32_t oa = a + div255(da * (255 - a));
+            g_framebuffer[sy * g_width + sx] = (oa << 24) | (orr << 16) | (og << 8) | ob;
+        }
+    }
+}
+
 static void draw_kitty_images(VTState *state, uint32_t *fb, int z_limit, int dir) {
     if (!state->kitty_placements) return;
     
@@ -593,9 +683,9 @@ static void draw_kitty_images(VTState *state, uint32_t *fb, int z_limit, int dir
                     uint32_t src_r = (src_pixel >> 16) & 0xFF;
                     uint32_t src_g = (src_pixel >> 8) & 0xFF;
                     uint32_t src_b = src_pixel & 0xFF;
-                    uint32_t out_r = (src_r * a + dst_r * (255 - a)) / 255;
-                    uint32_t out_g = (src_g * a + dst_g * (255 - a)) / 255;
-                    uint32_t out_b = (src_b * a + dst_b * (255 - a)) / 255;
+                    uint32_t out_r = div255(src_r * a + dst_r * (255 - a));
+                    uint32_t out_g = div255(src_g * a + dst_g * (255 - a));
+                    uint32_t out_b = div255(src_b * a + dst_b * (255 - a));
                     fb[screen_y * g_width + screen_x] = (dst & 0xFF000000) | (out_r << 16) | (out_g << 8) | out_b;
                 }
             }
@@ -620,18 +710,53 @@ void render_draw(VTState *state) {
         }
         shadow_w = g_width;
         shadow_h = g_height;
+        // Reset trail state on window resize
+        trail_active = 0;
+        last_cursor_x = -1;
+        last_cursor_y = -1;
     }
     uint32_t *real_fb = g_framebuffer;
     uint32_t *g_framebuffer = shadow_buffer;
+
+    // Cursor trail: detect a cursor jump and (re)start the glide animation
+    int cursor_shown_now = state->cursor_visible &&
+                           (!g_config.cursor_blink || g_cursor_blink_on);
+    int trail_on = g_config.cursor_trail && g_config.cursor_shape == 0 &&
+                   state->scroll_offset == 0 && cursor_shown_now;
+    if (state->cursor_x != last_cursor_x || state->cursor_y != last_cursor_y) {
+        if (trail_on && last_cursor_x >= 0) {
+            float fx = last_cursor_x, fy = last_cursor_y;
+            if (trail_active) {
+                // Retarget from wherever the animation currently is
+                float t = (bell_now_ms() - trail_start) / (float)(trail_end - trail_start);
+                if (t < 0) t = 0;
+                if (t > 1) t = 1;
+                float e = 1 - (1 - t) * (1 - t);
+                fx = trail_from_x + (trail_to_x - trail_from_x) * e;
+                fy = trail_from_y + (trail_to_y - trail_from_y) * e;
+            }
+            trail_from_x = fx;
+            trail_from_y = fy;
+            trail_to_x = state->cursor_x;
+            trail_to_y = state->cursor_y;
+            trail_start = bell_now_ms();
+            trail_end = trail_start + TRAIL_DURATION_MS;
+            trail_active = 1;
+        }
+        last_cursor_x = state->cursor_x;
+        last_cursor_y = state->cursor_y;
+    }
+    int trail_now = trail_active;
+    if (trail_active && bell_now_ms() >= trail_end) trail_active = 0;
 
     uint32_t alpha = (uint32_t)(g_config.opacity * 255.0f);
     if (alpha > 255) alpha = 255;
     uint32_t bg_r = (g_config.bg_color >> 16) & 0xFF;
     uint32_t bg_g = (g_config.bg_color >> 8) & 0xFF;
     uint32_t bg_b = g_config.bg_color & 0xFF;
-    bg_r = (bg_r * alpha) / 255;
-    bg_g = (bg_g * alpha) / 255;
-    bg_b = (bg_b * alpha) / 255;
+    bg_r = div255(bg_r * alpha);
+    bg_g = div255(bg_g * alpha);
+    bg_b = div255(bg_b * alpha);
     uint32_t clear_bg = (alpha << 24) | (bg_r << 16) | (bg_g << 8) | bg_b;
 
     // Composite the background (plain color or image) — rebuilt on resize or
@@ -709,9 +834,10 @@ void render_draw(VTState *state) {
             int cursor_shown = state->cursor_visible &&
                                (!g_config.cursor_blink || g_cursor_blink_on);
             int is_cursor = (cursor_shown && logical_y == state->cursor_y && x == state->cursor_x);
+            if (trail_now) is_cursor = 0; // the animated block replaces it
             if (is_cursor && g_config.cursor_shape == 0) {
                 bg = g_config.cursor_color;
-                fg = c.bg_color;
+                fg = g_config.cursor_text_color_set ? g_config.cursor_text_color : c.bg_color;
             }
             
             uint32_t bg_pixel = clear_bg;
@@ -804,10 +930,10 @@ void render_draw(VTState *state) {
                                         uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
                                         uint32_t bg_r = (dst >> 16) & 0xFF, bg_g = (dst >> 8) & 0xFF, bg_b = dst & 0xFF;
                                         uint32_t dst_a = (dst >> 24) & 0xFF;
-                                        uint32_t r = (fg_r * alpha + bg_r * (255 - alpha)) / 255;
-                                        uint32_t g2 = (fg_g * alpha + bg_g * (255 - alpha)) / 255;
-                                        uint32_t b2 = (fg_b * alpha + bg_b * (255 - alpha)) / 255;
-                                        uint32_t new_a = alpha + (dst_a * (255 - alpha)) / 255;
+                                        uint32_t r = div255(fg_r * alpha + bg_r * (255 - alpha));
+                                        uint32_t g2 = div255(fg_g * alpha + bg_g * (255 - alpha));
+                                        uint32_t b2 = div255(fg_b * alpha + bg_b * (255 - alpha));
+                                        uint32_t new_a = alpha + div255(dst_a * (255 - alpha));
                                         g_framebuffer[pY * g_width + pX] = (new_a << 24) | (r << 16) | (g2 << 8) | b2;
                                     }
                                 }
@@ -871,7 +997,76 @@ void render_draw(VTState *state) {
         }
     }
     
+    // Animated cursor trail: glide block + fading smear + riding glyph
+    if (trail_now) {
+        float t = (bell_now_ms() - trail_start) / (float)(trail_end - trail_start);
+        if (t < 0) t = 0;
+        if (t >= 1) {
+            trail_active = 0;
+        } else {
+            float e = 1 - (1 - t) * (1 - t); // ease-out quad
+            float ax = trail_from_x + (trail_to_x - trail_from_x) * e;
+            float ay = trail_from_y + (trail_to_y - trail_from_y) * e;
+            int px = g_config.padding_left + (int)(ax * g_cell_width);
+            int py = g_config.padding_top + (int)(ay * g_cell_height);
+            int fx = g_config.padding_left + (int)(trail_from_x * g_cell_width);
+            int fy = g_config.padding_top + (int)(trail_from_y * g_cell_height);
+
+            // Fading smear from the origin cell to the current position
+            int tail_alpha = (int)(110 * (1 - e));
+            if (tail_alpha > 0) {
+                int x0 = px < fx ? px : fx;
+                int y0 = py < fy ? py : fy;
+                int x1 = (px > fx ? px : fx) + g_cell_width;
+                int y1 = (py > fy ? py : fy) + g_cell_height;
+                blend_rect(g_framebuffer, x0, y0, x1, y1, g_config.cursor_color, tail_alpha);
+            }
+
+            // The cursor block itself
+            fill_solid_rect(g_framebuffer, px, py, px + g_cell_width, py + g_cell_height,
+                            g_config.cursor_color | 0xFF000000);
+
+            // The destination character rides the cursor
+            Cell cc = state->cells[state->cursor_y * state->cols + state->cursor_x];
+            if (!(cc.attrs & (CELL_WIDE | CELL_TRAIL)) &&
+                cc.char_code >= 32 && cc.char_code < GLYPH_CACHE_SIZE) {
+                Glyph *b = &g_glyph_cache[cc.char_code];
+                if (b->bitmap && b->w > 1) {
+                    uint32_t textfg = g_config.cursor_text_color_set
+                                          ? g_config.cursor_text_color
+                                          : cc.bg_color;
+                    blit_glyph_at(b, px, py, textfg);
+                }
+            }
+        }
+    }
+
     draw_kitty_images(state, g_framebuffer, 0, 1);
+
+    // Visual bell flash: overlay the foreground color, fading out
+    extern int64_t g_bell_flash_until;
+    extern int64_t g_bell_flash_start;
+    if (g_bell_flash_until) {
+        int64_t now_ms = bell_now_ms();
+        if (now_ms < g_bell_flash_until && g_bell_flash_until > g_bell_flash_start) {
+            float t = 1.0f - (float)(now_ms - g_bell_flash_start) /
+                              (float)(g_bell_flash_until - g_bell_flash_start);
+            uint32_t alpha = (uint32_t)(96.0f * t); // max ~38% overlay
+            uint32_t fr = (g_config.fg_color >> 16) & 0xFF;
+            uint32_t fgc = (g_config.fg_color >> 8) & 0xFF;
+            uint32_t fb2 = g_config.fg_color & 0xFF;
+            int total = g_width * g_height;
+            for (int i = 0; i < total; i++) {
+                uint32_t px = g_framebuffer[i];
+                uint32_t pa = (px >> 24) & 0xFF;
+                uint32_t r = (px >> 16) & 0xFF, g = (px >> 8) & 0xFF, b = px & 0xFF;
+                r = div255(fr * alpha + r * (255 - alpha));
+                g = div255(fgc * alpha + g * (255 - alpha));
+                b = div255(fb2 * alpha + b * (255 - alpha));
+                g_framebuffer[i] = (pa << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
     
     memcpy(real_fb, shadow_buffer, g_width * g_height * 4);
 }

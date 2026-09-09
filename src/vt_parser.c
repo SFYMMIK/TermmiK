@@ -697,7 +697,12 @@ static void put_char(VTState *state, uint32_t c) {
             return;
         }
         case '\a':
-            return; // Bell — ignored silently
+            // Bell — flash the screen when visual_bell_duration is configured
+            {
+                extern void term_bell(void);
+                term_bell();
+            }
+            return;
         case 0x7F:
             return; // DEL — ignored
         default:

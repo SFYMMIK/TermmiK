@@ -239,6 +239,7 @@ static int x11_poll_events(void) {
             }
 
             if (len > 0) {
+                term_clear_selection();
                 term_send_input(chars, len);
             }
         } else if (ev.type == FocusIn) {

@@ -36,9 +36,9 @@ typedef struct {
     uint32_t char_code;
     uint32_t fg_color;
     uint32_t bg_color;
-    int wrapped;
+    uint8_t wrapped;
     uint8_t attrs;
-} Cell;
+} Cell; // 16 bytes — keep it tight: scrollback holds rows*cols of these
 
 typedef struct KittyImage {
     int id;

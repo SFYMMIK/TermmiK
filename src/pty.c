@@ -30,6 +30,13 @@
 #include <termios.h>
 #include <string.h>
 
+// Safe copy of a config string into a local (mutable) buffer
+static void copy_env_pair(char *dst, const char *src, size_t dst_size) {
+    size_t i = 0;
+    for (; i + 1 < dst_size && src[i]; i++) dst[i] = src[i];
+    dst[i] = '\0';
+}
+
 int pty_spawn(int *master_fd, pid_t *pid, int rows, int cols) {
     int mfd = posix_openpt(O_RDWR | O_NOCTTY);
     if (mfd < 0) return -1;
@@ -91,6 +98,35 @@ int pty_spawn(int *master_fd, pid_t *pid, int rows, int cols) {
         setenv("TERM", g_config.term_name[0] ? g_config.term_name : "xterm-256color", 1);
         // Advertise truecolor support so apps pick 24-bit color
         setenv("COLORTERM", "truecolor", 1);
+
+        // Apply configured environment variables (config: env NAME=VALUE)
+        for (int i = 0; i < g_config.num_env_vars; i++) {
+            char pair[256];
+            copy_env_pair(pair, g_config.env_vars[i], sizeof(pair));
+            char *eq = strchr(pair, '=');
+            if (eq && eq != pair) {
+                *eq = '\0';
+                setenv(pair, eq + 1, 1);
+            }
+        }
+
+        // Spawn the configured shell command if set, else $SHELL
+        if (g_config.shell[0]) {
+            char shbuf[128];
+            copy_env_pair(shbuf, g_config.shell, sizeof(shbuf));
+            char *argv[8];
+            int argc = 0;
+            char *tok = strtok(shbuf, " \t");
+            while (tok && argc < 7) {
+                argv[argc++] = tok;
+                tok = strtok(NULL, " \t");
+            }
+            if (argc > 0) {
+                argv[argc] = NULL;
+                execvp(argv[0], argv);
+                exit(1);
+            }
+        }
         char *shell = getenv("SHELL");
         if (!shell) shell = "/bin/sh";
 

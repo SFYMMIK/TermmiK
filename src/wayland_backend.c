@@ -513,6 +513,7 @@ static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t s
     }
 
     if (len > 0) {
+        term_clear_selection();
         term_send_input(buf, len);
         key_repeat_start(buf, len);
     }
@@ -751,6 +752,7 @@ static void wayland_handle_timer(void) {
         uint64_t expirations;
         if (read(key_repeat_fd, &expirations, sizeof(expirations)) == sizeof(expirations)) {
             for (uint64_t i = 0; i < expirations; i++) {
+                term_clear_selection();
                 term_send_input(key_repeat_str, key_repeat_len);
             }
         }

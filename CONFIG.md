@@ -2,6 +2,8 @@
 
 TermmiK supports dynamic configuration via a plain text config file. There is no need to recompile the terminal after making changes to the configuration.
 
+> This file is the **complete reference** for every option. For a guided tour with ready-to-copy examples (glassy transparency, image backgrounds, cursor trails, theming...), see [CUSTOMIZING.md](./CUSTOMIZING.md).
+
 ## Configuration Location
 
 TermmiK automatically looks for its configuration file at the following location:
@@ -78,9 +80,10 @@ The image is composited into the background, so **window transparency keeps work
 
 ### Visuals
 - `opacity` (float): The transparency of the terminal background, from `0.0` (fully transparent) to `1.0` (fully opaque). Defaults to `1.0`. Native hardware-accelerated transparency is applied only to the background, keeping text fully opaque.
-- `cursor_shape` (int): The shape of the cursor. `0` block, `1` underline, `2` bar. Defaults to `0`. (Applications can also change it at runtime via `DECSCUSR`.)
+- `cursor_shape` (int): The shape of the cursor. `0` block (`█`), `1` underline (`▁`), `2` bar (`|`). Defaults to `0`. (Applications can also change it at runtime via `DECSCUSR`.)
 - `cursor_blink` (int): `1` makes the cursor blink while the terminal is idle. Any input resets it to solid. Defaults to `0`.
 - `cursor_blink_interval` (int): Blink period in milliseconds. Defaults to `300`.
+- `cursor_trail` (int): `1` enables an animated cursor trail — when the cursor jumps (prompt redraws, vim motions...), the block glides to its new position with an ease-out curve and a fading smear, carrying the character under it. Only applies to the block cursor. Defaults to `0`.
 
 ### Colors
 Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
@@ -94,6 +97,19 @@ Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
 - `mouse_scroll_step` (int): Lines scrolled per wheel tick. Defaults to `3`.
 - `bold_brightens_text` (int): `1` (default) maps bold ANSI colors 0-7 to their bright variants 8-15. Set to `0` for themes that encode emphasis purely in the color values.
 - `term_name` (string): The value exported as `TERM` to spawned programs. Defaults to `xterm-256color`. Change it only if you know the matching terminfo entry is installed.
+- `shell` (string): Command to spawn instead of `$SHELL`, with arguments — e.g. `shell=zsh -l`. Empty by default.
+- `env` (string): Export an environment variable to the spawned shell. Repeatable: `env EDITOR=helix`, `env TERMINAL=termmik`. Up to 32 entries.
+- `visual_bell_duration` (number): Screen flash duration when a program rings the terminal bell (`\a`), in seconds (kitty-style floats like `0.15` work; values `>= 10` are treated as milliseconds). The flash fades out using the foreground color. `0` (default) disables it.
+- `cursor_stop_blinking_after` (float): Seconds of terminal idleness after which the cursor stops blinking and stays solid. Defaults to `15`. `0` keeps it blinking forever.
+
+### Font Spacing
+Fine-tune the metrics computed from your font (pixel deltas, can be negative):
+- `adjust_line_height` (int): Added to the cell height. Defaults to `0`.
+- `adjust_column_width` (int): Added to the cell width. Defaults to `0`.
+- `adjust_baseline` (int): Shifts the text baseline inside the cell. Defaults to `0`.
+
+### Cursor Colors
+- `cursor_text_color` (optional): The text color drawn on top of a block cursor. When unset, the text keeps its own background color (inverted look).
 
 ### Runtime Color Control
 Programs can change colors at runtime without touching the config file: `OSC 10`/`OSC 11` set the default foreground/background (used by theme switchers), `OSC 4` reads and sets the 16-color palette, and `OSC 104`/`OSC 110`/`OSC 111` reset them back to the values from this file.

@@ -130,6 +130,7 @@ void config_load(void) {
     g_config.cursor_shape = 0;
     g_config.cursor_blink = 0;
     g_config.cursor_blink_interval = 300;
+    g_config.cursor_trail = 0;
     g_config.scrollback_lines = 10000;
     g_config.mouse_scroll_step = 3;
     g_config.selection_fg_set = 0;
@@ -142,6 +143,15 @@ void config_load(void) {
     g_config.background_image[0] = '\0';
     g_config.background_image_opacity = 1.0f;
     g_config.background_image_mode = 0;
+    g_config.shell[0] = '\0';
+    g_config.num_env_vars = 0;
+    g_config.cursor_text_color_set = 0;
+    g_config.cursor_text_color = 0x000000;
+    g_config.visual_bell_duration = 0;
+    g_config.cursor_stop_blinking_after = 15.0f;
+    g_config.adjust_line_height = 0;
+    g_config.adjust_column_width = 0;
+    g_config.adjust_baseline = 0;
 
     const char *home = getenv("HOME");
     if (!home) { snapshot_defaults(); return; }
@@ -240,6 +250,8 @@ void config_load(void) {
                 g_config.cursor_blink_interval = parse_int(v, val_len);
             } else if (starts_with(k, "cursor_blink", key_len)) {
                 g_config.cursor_blink = parse_int(v, val_len);
+            } else if (starts_with(k, "cursor_trail", key_len)) {
+                g_config.cursor_trail = parse_int(v, val_len);
             } else if (starts_with(k, "scrollback_lines", key_len)) {
                 g_config.scrollback_lines = parse_int(v, val_len);
             } else if (starts_with(k, "mouse_scroll_step", key_len)) {
@@ -280,6 +292,37 @@ void config_load(void) {
                              line_no, g_config.background_image);
                     my_print(msg);
                 }
+            } else if (starts_with(k, "shell", key_len)) {
+                copy_string(g_config.shell, v, val_len, 128);
+            } else if (starts_with(k, "env", key_len)) {
+                // env NAME=VALUE — repeatable, exported to the spawned shell
+                if (val_len > 0 && val_len < 256) {
+                    if (g_config.num_env_vars < 32) {
+                        copy_string(g_config.env_vars[g_config.num_env_vars++], v, val_len, 256);
+                    } else {
+                        char msg[96];
+                        snprintf(msg, sizeof(msg),
+                                 "TermmiK: config line %d: too many env entries, ignored\n", line_no);
+                        my_print(msg);
+                    }
+                }
+            } else if (starts_with(k, "cursor_text_color", key_len)) {
+                g_config.cursor_text_color = parse_hex(v, val_len);
+                g_config.cursor_text_color_set = 1;
+            } else if (starts_with(k, "visual_bell_duration", key_len)) {
+                // Accept both seconds (kitty style float) and milliseconds >= 10
+                float f = parse_float(v, val_len);
+                g_config.visual_bell_duration = (f > 0.0f && f < 10.0f) ? (int)(f * 1000.0f) : (int)f;
+                if (g_config.visual_bell_duration < 0) g_config.visual_bell_duration = 0;
+            } else if (starts_with(k, "cursor_stop_blinking_after", key_len)) {
+                g_config.cursor_stop_blinking_after = parse_float(v, val_len);
+                if (g_config.cursor_stop_blinking_after < 0) g_config.cursor_stop_blinking_after = 0;
+            } else if (starts_with(k, "adjust_line_height", key_len)) {
+                g_config.adjust_line_height = parse_int(v, val_len);
+            } else if (starts_with(k, "adjust_column_width", key_len)) {
+                g_config.adjust_column_width = parse_int(v, val_len);
+            } else if (starts_with(k, "adjust_baseline", key_len)) {
+                g_config.adjust_baseline = parse_int(v, val_len);
             } else if (starts_with(k, "foreground", key_len)) {
                 g_config.fg_color = parse_hex(v, val_len);
             } else if (starts_with(k, "background", key_len)) {

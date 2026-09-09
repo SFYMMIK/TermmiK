@@ -32,5 +32,6 @@ void render_draw(VTState *state);
 void render_cleanup(void);
 void render_resize(int width, int height);
 void render_invalidate_background(void); // rebuild after OSC 10/11 color changes
+int  cursor_trail_active(void);          // cursor glide animation in progress
 
 #endif
