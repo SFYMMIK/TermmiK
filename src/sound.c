@@ -125,7 +125,7 @@ static short *synth_click(int *out_frames, int *out_channels) {
 
 void sound_init(void) {
     const char *path = g_config.key_sound;
-    if (!path[0]) return;
+    if (!path[0] || !g_config.key_sound_enabled) return;
 
     int frames = 0, channels = 0;
     if (strcmp(path, "default") == 0) {

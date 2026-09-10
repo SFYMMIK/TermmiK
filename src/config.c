@@ -153,6 +153,7 @@ void config_load(void) {
     g_config.adjust_baseline = 0;
     g_config.key_sound[0] = '\0';
     g_config.key_sound_volume = 0.5f;
+    g_config.key_sound_enabled = 1;
 
     const char *home = getenv("HOME");
     if (!home) { snapshot_defaults(); return; }
@@ -329,6 +330,8 @@ void config_load(void) {
                 g_config.adjust_column_width = parse_int(v, val_len);
             } else if (starts_with(k, "adjust_baseline", key_len)) {
                 g_config.adjust_baseline = parse_int(v, val_len);
+            } else if (starts_with(k, "key_sound_enabled", key_len)) {
+                g_config.key_sound_enabled = parse_int(v, val_len);
             } else if (starts_with(k, "key_sound_volume", key_len)) {
                 g_config.key_sound_volume = parse_float(v, val_len);
                 if (g_config.key_sound_volume < 0.0f) g_config.key_sound_volume = 0.0f;

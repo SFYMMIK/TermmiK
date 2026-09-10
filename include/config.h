@@ -62,6 +62,7 @@ typedef struct {
     int adjust_baseline;
     char key_sound[512];        // WAV path, "default" = synthesized click, empty = off
     float key_sound_volume;     // 0.0 - 1.0
+    int key_sound_enabled;      // 0/1 master switch
 } TermConfig;
 
 extern TermConfig g_config;

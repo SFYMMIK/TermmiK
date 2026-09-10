@@ -82,6 +82,7 @@ visual_bell_duration=0.15       # screen flash when a program rings the bell
 
 # Mechanical-style typing sounds
 key_sound=default               # or a path to your own 16-bit PCM .wav
+key_sound_enabled=1             # 0 = mute entirely
 key_sound_volume=0.5
 ```
 

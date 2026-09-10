@@ -103,6 +103,7 @@ Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
 
 ### Typing Sounds
 - `key_sound` (string): A short sound played on every keypress. Set it to `default` for a built-in synthesized mechanical-style click (no files needed), or to the path of a 16-bit PCM WAV file. Empty (default) disables it.
+- `key_sound_enabled` (int): Master switch — `0` mutes the typing sound entirely without touching the other `key_sound_*` options. Defaults to `1`.
 - `key_sound_volume` (float): Playback volume, from `0.0` to `1.0`. Defaults to `0.5`.
 
 Playback goes through ALSA (`libasound`) directly — no sound servers or extra daemons. If the device or sample is unavailable, the feature silently disables itself and typing is never affected.
