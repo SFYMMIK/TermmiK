@@ -17,10 +17,9 @@
  */
 
 // Key sound effects: play a short sample on every keypress through ALSA.
-// 16-bit PCM WAV files are parsed in-house (no decoder dependencies); the
-// special path "default" synthesizes a mechanical-style click. Everything
-// degrades silently if ALSA or the sample is unavailable — typing must
-// never be affected.
+// The user supplies their own 16-bit PCM WAV file; it is parsed in-house
+// (no decoder dependencies). Everything degrades silently if ALSA or the
+// sample is unavailable — typing must never be affected.
 
 #include "sound.h"
 #include "config.h"
@@ -98,45 +97,15 @@ static short *load_wav(const char *path, int *out_frames, int *out_channels) {
     return data;
 }
 
-// Synthesize a short mechanical-style click: a burst of filtered noise with
-// an exponential decay (~16ms at 48kHz mono). No asset files needed.
-static short *synth_click(int *out_frames, int *out_channels) {
-    const int rate = 48000;
-    const int len = rate * 16 / 1000; // 16 ms
-    short *buf = malloc(len * sizeof(short));
-    if (!buf) return NULL;
-    unsigned int seed = 0x1234abcd;
-    float lp = 0.0f;
-    for (int i = 0; i < len; i++) {
-        float t = (float)i / len;
-        float env = expf(-t * 9.0f) * (1.0f - t * 0.3f);
-        seed = seed * 1103515245 + 12345;
-        float noise = ((int)(seed >> 16) % 2000) / 1000.0f - 1.0f;
-        lp += 0.35f * (noise - lp); // soften the highs a little
-        float v = lp * env * 0.85f;
-        if (v > 1.0f) v = 1.0f;
-        if (v < -1.0f) v = -1.0f;
-        buf[i] = (short)(v * 32000);
-    }
-    *out_frames = len;
-    *out_channels = 1;
-    return buf;
-}
-
 void sound_init(void) {
     const char *path = g_config.key_sound;
     if (!path[0] || !g_config.key_sound_enabled) return;
 
     int frames = 0, channels = 0;
-    if (strcmp(path, "default") == 0) {
-        samples = synth_click(&frames, &channels);
-        if (!samples) { warn_once("TermmiK: key_sound=default synthesis failed"); return; }
-    } else {
-        samples = load_wav(path, &frames, &channels);
-        if (!samples) {
-            warn_once("TermmiK: key_sound file not found or not 16-bit PCM WAV");
-            return;
-        }
+    samples = load_wav(path, &frames, &channels);
+    if (!samples) {
+        warn_once("TermmiK: key_sound file not found or not a 16-bit PCM WAV");
+        return;
     }
     sample_frames = frames;
 

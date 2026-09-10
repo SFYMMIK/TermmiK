@@ -102,7 +102,7 @@ Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
 - `cursor_stop_blinking_after` (float): Seconds of terminal idleness after which the cursor stops blinking and stays solid. Defaults to `15`. `0` keeps it blinking forever.
 
 ### Typing Sounds
-- `key_sound` (string): A short sound played on every keypress. Set it to `default` for a built-in synthesized mechanical-style click (no files needed), or to the path of a 16-bit PCM WAV file. Empty (default) disables it.
+- `key_sound` (string): Path to a short 16-bit PCM WAV file (mono or stereo) played on every keypress. TermmiK ships no sound — grab your own keycap click sample and point at it. Empty (default) disables it.
 - `key_sound_enabled` (int): Master switch — `0` mutes the typing sound entirely without touching the other `key_sound_*` options. Defaults to `1`.
 - `key_sound_volume` (float): Playback volume, from `0.0` to `1.0`. Defaults to `0.5`.
 
