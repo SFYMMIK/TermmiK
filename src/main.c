@@ -448,6 +448,7 @@ int main(int argc, char **argv) {
     char buf[4096];
     struct timespec last_scroll_time = {0};
     int64_t last_activity_ms = 0;
+    int64_t trail_last_active_ms = 0; // last time the cursor glide animated
 
     while (1) {
         int timeout = -1;
@@ -455,6 +456,13 @@ int main(int argc, char **argv) {
             timeout = 100;
         } else if (g_config.cursor_blink == 1) {
             timeout = CURSOR_BLINK_INTERVAL_MS;
+        }
+        // Keep ticking frames while the cursor trail animates
+        if (cursor_trail_active()) {
+            trail_last_active_ms = bell_now_ms();
+            if (timeout < 0 || timeout > TRAIL_FRAME_MS) {
+                timeout = TRAIL_FRAME_MS;
+            }
         }
         // Wake up when the visual bell flash should end
         if (g_bell_flash_until) {
@@ -465,10 +473,6 @@ int main(int argc, char **argv) {
             } else if (timeout < 0 || rem < timeout) {
                 timeout = (rem < 1) ? 1 : (int)rem;
             }
-        }
-        // Keep ticking frames while the cursor trail animates
-        if (cursor_trail_active() && (timeout < 0 || timeout > TRAIL_FRAME_MS)) {
-            timeout = TRAIL_FRAME_MS;
         }
 
         int poll_result = poll(fds, nfds, timeout);
@@ -481,17 +485,28 @@ int main(int argc, char **argv) {
             if (cursor_trail_active()) {
                 needs_render = 1; // animation frame
             } else if (g_config.cursor_blink == 1 && !g_select_dragging) {
-                // Stop blinking (solid cursor) after cursor_stop_blinking_after
-                float stop_after = g_config.cursor_stop_blinking_after;
-                int64_t idle = bell_now_ms() - last_activity_ms;
-                if (stop_after > 0 && idle >= (int64_t)(stop_after * 1000.0f)) {
+                // Blink only while the cursor is still: never toggle on/off
+                // while typing (the trail was animating recently). The cursor
+                // stays solid during the animation and for one blink interval
+                // after it settles.
+                if (bell_now_ms() - trail_last_active_ms < CURSOR_BLINK_INTERVAL_MS) {
                     if (!g_cursor_blink_on) {
                         g_cursor_blink_on = 1;
                         needs_render = 1;
                     }
                 } else {
-                    g_cursor_blink_on = !g_cursor_blink_on;
-                    needs_render = 1;
+                    // Stop blinking (solid cursor) after cursor_stop_blinking_after
+                    float stop_after = g_config.cursor_stop_blinking_after;
+                    int64_t idle = bell_now_ms() - last_activity_ms;
+                    if (stop_after > 0 && idle >= (int64_t)(stop_after * 1000.0f)) {
+                        if (!g_cursor_blink_on) {
+                            g_cursor_blink_on = 1;
+                            needs_render = 1;
+                        }
+                    } else {
+                        g_cursor_blink_on = !g_cursor_blink_on;
+                        needs_render = 1;
+                    }
                 }
             }
         } else {
