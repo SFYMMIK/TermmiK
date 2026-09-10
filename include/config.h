@@ -60,6 +60,8 @@ typedef struct {
     int adjust_line_height;     // pixel deltas applied to the cell metrics
     int adjust_column_width;
     int adjust_baseline;
+    char key_sound[512];        // WAV path, "default" = synthesized click, empty = off
+    float key_sound_volume;     // 0.0 - 1.0
 } TermConfig;
 
 extern TermConfig g_config;

@@ -30,6 +30,7 @@
 #include "render.h"
 #include "config.h"
 #include "backend.h"
+#include "sound.h"
 
 int g_width = 80 * 9;
 int g_height = 24 * 18;
@@ -384,6 +385,7 @@ void term_scroll(int offset) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     config_load();
+    sound_init();
 
 #ifdef _HAS_WAYLAND
     if (getenv("WAYLAND_DISPLAY")) {
@@ -571,5 +573,6 @@ int main(int argc, char **argv) {
     }
 
     g_backend->cleanup();
+    sound_cleanup();
     return 0;
 }

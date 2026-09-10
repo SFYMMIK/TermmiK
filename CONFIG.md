@@ -101,6 +101,12 @@ Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
 - `visual_bell_duration` (number): Screen flash duration when a program rings the terminal bell (`\a`), in seconds (kitty-style floats like `0.15` work; values `>= 10` are treated as milliseconds). The flash fades out using the foreground color. `0` (default) disables it.
 - `cursor_stop_blinking_after` (float): Seconds of terminal idleness after which the cursor stops blinking and stays solid. Defaults to `15`. `0` keeps it blinking forever.
 
+### Typing Sounds
+- `key_sound` (string): A short sound played on every keypress. Set it to `default` for a built-in synthesized mechanical-style click (no files needed), or to the path of a 16-bit PCM WAV file. Empty (default) disables it.
+- `key_sound_volume` (float): Playback volume, from `0.0` to `1.0`. Defaults to `0.5`.
+
+Playback goes through ALSA (`libasound`) directly — no sound servers or extra daemons. If the device or sample is unavailable, the feature silently disables itself and typing is never affected.
+
 ### Font Spacing
 Fine-tune the metrics computed from your font (pixel deltas, can be negative):
 - `adjust_line_height` (int): Added to the cell height. Defaults to `0`.

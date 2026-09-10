@@ -63,6 +63,7 @@ WindowBackend* get_wayland_backend();
 void term_resize(int width, int height);
 void term_send_input(const char *buf, int len);
 void term_clear_selection(void); // dismiss the current text selection
+void sound_play_key(void);       // play the configured typing sound (no-op if unset)
 void term_scroll(int offset);
 
 // Shared input helpers implemented in main.c

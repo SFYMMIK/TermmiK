@@ -73,12 +73,16 @@ padding_bottom=0
 window_scale=0.9                # initial window size vs. the screen
 ```
 
-## 5. Scroll & feel
+## 5. Scroll, bell & typing sounds
 
 ```ini
 scrollback_lines=10000          # history depth
 mouse_scroll_step=5             # lines per wheel tick
 visual_bell_duration=0.15       # screen flash when a program rings the bell
+
+# Mechanical-style typing sounds
+key_sound=default               # or a path to your own 16-bit PCM .wav
+key_sound_volume=0.5
 ```
 
 ## 6. What runs inside

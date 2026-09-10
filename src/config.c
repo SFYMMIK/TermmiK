@@ -151,6 +151,8 @@ void config_load(void) {
     g_config.adjust_line_height = 0;
     g_config.adjust_column_width = 0;
     g_config.adjust_baseline = 0;
+    g_config.key_sound[0] = '\0';
+    g_config.key_sound_volume = 0.5f;
 
     const char *home = getenv("HOME");
     if (!home) { snapshot_defaults(); return; }
@@ -327,6 +329,12 @@ void config_load(void) {
                 g_config.adjust_column_width = parse_int(v, val_len);
             } else if (starts_with(k, "adjust_baseline", key_len)) {
                 g_config.adjust_baseline = parse_int(v, val_len);
+            } else if (starts_with(k, "key_sound_volume", key_len)) {
+                g_config.key_sound_volume = parse_float(v, val_len);
+                if (g_config.key_sound_volume < 0.0f) g_config.key_sound_volume = 0.0f;
+                if (g_config.key_sound_volume > 1.0f) g_config.key_sound_volume = 1.0f;
+            } else if (starts_with(k, "key_sound", key_len)) {
+                copy_string(g_config.key_sound, v, val_len, 512);
             } else if (starts_with(k, "foreground", key_len)) {
                 g_config.fg_color = parse_hex(v, val_len);
             } else if (starts_with(k, "background", key_len)) {

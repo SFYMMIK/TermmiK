@@ -16,9 +16,16 @@
 
 CC = gcc
 CFLAGS = -fno-builtin -Wall -Wextra -Wno-unused-parameter -O2 -g -ffunction-sections -fdata-sections -Iinclude
-LDFLAGS = -lm -lfontconfig -Wl,--gc-sections -flto 
+LDFLAGS = -lm -lfontconfig -Wl,--gc-sections -flto
 
 SRCS = src/main.c src/pty.c src/vt_parser.c src/render.c src/alloc.c src/config.c
+
+ifndef DISABLE_SOUND
+    LDFLAGS += -lasound
+else
+    CFLAGS += -DDISABLE_SOUND
+endif
+SRCS += src/sound.c
 
 ifndef DISABLE_X11
     CFLAGS += -D_HAS_X11
