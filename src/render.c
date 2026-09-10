@@ -761,8 +761,10 @@ void render_draw(VTState *state) {
             }
             trail_from_x = fx;
             trail_from_y = fy;
-            trail_to_x = state->cursor_x;
-            trail_to_y = state->cursor_y;
+            // Clamp: at wrap-pending cursor_x == cols, which would draw the
+            // glide one cell past the right edge (and read cells out of bounds)
+            trail_to_x = state->cursor_x < state->cols ? state->cursor_x : state->cols - 1;
+            trail_to_y = state->cursor_y < state->rows ? state->cursor_y : state->rows - 1;
             trail_start = bell_now_ms();
             trail_end = trail_start + TRAIL_DURATION_MS;
             trail_active = 1;
@@ -770,8 +772,14 @@ void render_draw(VTState *state) {
         last_cursor_x = state->cursor_x;
         last_cursor_y = state->cursor_y;
     }
+    // Expire BEFORE capturing trail_now: otherwise the final frame suppresses
+    // the real cursor without drawing the animated one, and the main loop
+    // stops ticking — the cursor would vanish until the next input event.
+    // Scrolling also snaps the animation (its offsets would be stale).
+    if (trail_active && (bell_now_ms() >= trail_end || state->scroll_offset != 0)) {
+        trail_active = 0;
+    }
     int trail_now = trail_active;
-    if (trail_active && bell_now_ms() >= trail_end) trail_active = 0;
 
     uint32_t alpha = (uint32_t)(g_config.opacity * 255.0f);
     if (alpha > 255) alpha = 255;
@@ -1063,7 +1071,8 @@ void render_draw(VTState *state) {
             draw_cursor_shape_at(px, py, cc, 255);
 
             // The destination character rides the cursor (block only)
-            if (g_config.cursor_shape == 0) {
+            if (g_config.cursor_shape == 0 &&
+                state->cursor_x < state->cols && state->cursor_y < state->rows) {
                 Cell cc2 = state->cells[state->cursor_y * state->cols + state->cursor_x];
                 if (!(cc2.attrs & (CELL_WIDE | CELL_TRAIL)) &&
                     cc2.char_code >= 32 && cc2.char_code < GLYPH_CACHE_SIZE) {
