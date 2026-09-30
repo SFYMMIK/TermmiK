@@ -14,32 +14,58 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-CC = gcc
-CFLAGS = -fno-builtin -Wall -Wextra -Wno-unused-parameter -O2 -g -ffunction-sections -fdata-sections -Iinclude
-LDFLAGS = -lm -lfontconfig -Wl,--gc-sections -flto
+CC ?= cc
+OPTFLAGS ?= -O2
+
+# Build for the CPU sitting in this machine (the terminal is meant to be as
+# fast as possible). Set NATIVE=0 for a portable binary — e.g. when building
+# on a distro build box or sharing the result with other machines.
+NATIVE ?= 1
+NATIVE_FLAGS =
+ifeq ($(NATIVE),1)
+    NATIVE_FLAGS = -march=native
+endif
+
+# CFLAGS/LDFLAGS may be overridden from the environment or the make command
+# line; the flags TermmiK itself requires are appended with `override` so a
+# custom CFLAGS/LDFLAGS still produces a working build. Use EXTRA_CFLAGS /
+# EXTRA_LDFLAGS to add flags without replacing anything. EXTRA_CFLAGS comes
+# last, so it can also replace NATIVE_FLAGS (e.g. EXTRA_CFLAGS=-march=x86-64).
+CFLAGS ?= $(OPTFLAGS) -g
+EXTRA_CFLAGS ?=
+EXTRA_LDFLAGS ?=
+
+override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter \
+                   -ffunction-sections -fdata-sections -flto=auto -Iinclude \
+                   $(NATIVE_FLAGS) $(EXTRA_CFLAGS)
+override LDFLAGS += -flto=auto -Wl,--gc-sections $(EXTRA_LDFLAGS)
+
+LDLIBS = -lm -lfontconfig
+STRIP ?= strip
 
 SRCS = src/main.c src/pty.c src/vt_parser.c src/render.c src/alloc.c src/config.c
 
 ifndef DISABLE_SOUND
-    LDFLAGS += -lasound
+    LDLIBS += -lasound
 else
-    CFLAGS += -DDISABLE_SOUND
+    override CFLAGS += -DDISABLE_SOUND
 endif
 SRCS += src/sound.c
 
 ifndef DISABLE_X11
-    CFLAGS += -D_HAS_X11
-    LDFLAGS += -lX11 -lXrandr -lXext
+    override CFLAGS += -D_HAS_X11
+    LDLIBS += -lX11 -lXext
     SRCS += src/x11_backend.c
 endif
 
 ifndef DISABLE_WAYLAND
-    CFLAGS += -D_HAS_WAYLAND
-    LDFLAGS += -lwayland-client -lwayland-cursor -lxkbcommon
+    override CFLAGS += -D_HAS_WAYLAND
+    LDLIBS += -lwayland-client -lwayland-cursor -lxkbcommon
     SRCS += src/wayland_backend.c src/xdg-shell-protocol.c src/xdg-decoration-protocol.c
 endif
 
 OBJS = $(patsubst src/%.c,build/%.o,$(SRCS))
+HEADERS = $(wildcard include/*.h)
 EXEC = TermmiK
 
 # Standard installation paths
@@ -56,10 +82,10 @@ build_dir:
 	mkdir -p build
 
 $(EXEC): $(OBJS)
-	$(CC) $(OBJS) -o $(EXEC) $(LDFLAGS)
-	strip $(EXEC)
+	$(CC) $(LDFLAGS) $(OBJS) -o $(EXEC) $(LDLIBS)
+	$(STRIP) $(EXEC)
 
-build/%.o: src/%.c
+build/%.o: src/%.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:

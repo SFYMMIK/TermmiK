@@ -44,6 +44,9 @@ static char *x11_clipboard_text = NULL;
 static Atom atom_CLIPBOARD, atom_UTF8_STRING, atom_TARGETS;
 static Atom x11_paste_target = None; // tracks in-flight paste conversion
 
+static void x11_destroy_buffer(void);
+static int x11_create_buffer(void);
+
 static void x11_set_clipboard(const char *text) {
     if (x11_clipboard_text) free(x11_clipboard_text);
     x11_clipboard_text = strdup(text);
@@ -114,7 +117,7 @@ static int x11_init(const char *font_pattern) {
     }
 
     if (g_config.opacity < 1.0f) {
-        unsigned long opacity = (unsigned long)(0xFFFFFFFFul * g_config.opacity);
+        unsigned long opacity = (unsigned long)(4294967295.0 * (double)g_config.opacity);
         Atom atom_opacity = XInternAtom(g_dpy, "_NET_WM_WINDOW_OPACITY", False);
         XChangeProperty(g_dpy, g_win, atom_opacity, XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&opacity, 1);
     }
@@ -127,34 +130,74 @@ static int x11_init(const char *font_pattern) {
         g_shm_supported = 1;
     }
 
-    if (g_shm_supported) {
-        g_ximage = XShmCreateImage(g_dpy, g_visual, g_depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
-        g_shminfo.shmid = shmget(IPC_PRIVATE, g_ximage->bytes_per_line * g_ximage->height, IPC_CREAT|0600);
-        g_shminfo.shmaddr = g_ximage->data = shmat(g_shminfo.shmid, 0, 0);
-        g_shminfo.readOnly = False;
-        XShmAttach(g_dpy, &g_shminfo);
-        XSync(g_dpy, False);
-        shmctl(g_shminfo.shmid, IPC_RMID, 0);
-        g_framebuffer = (uint32_t *)g_ximage->data;
-    } else {
-        // Fallback
-        g_framebuffer = malloc(g_width * g_height * 4);
-        g_ximage = XCreateImage(g_dpy, g_visual, g_depth, ZPixmap, 0, (char *)g_framebuffer, g_width, g_height, 32, 0);
+    if (x11_create_buffer() != 0) {
+        return -1;
     }
 
     return 0;
 }
 
-static void x11_cleanup(void) {
-    if (g_shm_supported) {
+static void x11_destroy_buffer(void) {
+    if (!g_ximage) return;
+    if (g_shm_supported && g_ximage->data) {
         XShmDetach(g_dpy, &g_shminfo);
         XSync(g_dpy, False);
         g_ximage->data = NULL;
         XDestroyImage(g_ximage);
-        shmdt(g_shminfo.shmaddr);
+        if (g_shminfo.shmaddr) shmdt(g_shminfo.shmaddr);
+        g_shminfo.shmaddr = NULL;
     } else {
-        XDestroyImage(g_ximage);
+        XDestroyImage(g_ximage); // frees the malloc'd data (non-SHM path)
     }
+    g_ximage = NULL;
+    g_framebuffer = NULL;
+}
+
+// (Re)create the pixel buffer at the current g_width x g_height. Every path
+// allocates a fresh buffer, so resizing is safe with and without MIT-SHM.
+static int x11_create_buffer(void) {
+    if (g_shm_supported) {
+        g_ximage = XShmCreateImage(g_dpy, g_visual, g_depth, ZPixmap, NULL,
+                                   &g_shminfo, g_width, g_height);
+        if (g_ximage) {
+            g_shminfo.shmid = shmget(IPC_PRIVATE,
+                                     g_ximage->bytes_per_line * g_ximage->height,
+                                     IPC_CREAT | 0600);
+            if (g_shminfo.shmid >= 0) {
+                g_shminfo.shmaddr = g_ximage->data = shmat(g_shminfo.shmid, 0, 0);
+                if (g_shminfo.shmaddr != (char *)-1) {
+                    g_shminfo.readOnly = False;
+                    XShmAttach(g_dpy, &g_shminfo);
+                    XSync(g_dpy, False);
+                    shmctl(g_shminfo.shmid, IPC_RMID, 0);
+                    g_framebuffer = (uint32_t *)g_ximage->data;
+                    return 0;
+                }
+                shmctl(g_shminfo.shmid, IPC_RMID, 0);
+            }
+            g_ximage->data = NULL;
+            XDestroyImage(g_ximage);
+            g_ximage = NULL;
+        }
+        // MIT-SHM advertised but unusable — use plain XPutImage for the
+        // rest of the session.
+        g_shm_supported = 0;
+    }
+
+    g_framebuffer = malloc((size_t)g_width * g_height * 4);
+    if (!g_framebuffer) return -1;
+    g_ximage = XCreateImage(g_dpy, g_visual, g_depth, ZPixmap, 0,
+                            (char *)g_framebuffer, g_width, g_height, 32, 0);
+    if (!g_ximage) {
+        free(g_framebuffer);
+        g_framebuffer = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static void x11_cleanup(void) {
+    x11_destroy_buffer();
     XFreeGC(g_dpy, g_gc);
     XDestroyWindow(g_dpy, g_win);
     XCloseDisplay(g_dpy);
@@ -253,25 +296,11 @@ static int x11_poll_events(void) {
             if (nw != g_width || nh != g_height) {
                 g_width = nw;
                 g_height = nh;
-                
-                if (g_shm_supported) {
-                    XShmDetach(g_dpy, &g_shminfo);
-                    XSync(g_dpy, False);
-                    g_ximage->data = NULL;
-                    XDestroyImage(g_ximage);
-                    shmdt(g_shminfo.shmaddr);
-                    shmctl(g_shminfo.shmid, IPC_RMID, 0);
-                    
-                    g_ximage = XShmCreateImage(g_dpy, g_visual, g_depth, ZPixmap, NULL, &g_shminfo, g_width, g_height);
-                    g_shminfo.shmid = shmget(IPC_PRIVATE, g_ximage->bytes_per_line * g_ximage->height, IPC_CREAT|0600);
-                    g_shminfo.shmaddr = g_ximage->data = shmat(g_shminfo.shmid, 0, 0);
-                    g_shminfo.readOnly = False;
-                    XShmAttach(g_dpy, &g_shminfo);
-                    XSync(g_dpy, False);
-                    shmctl(g_shminfo.shmid, IPC_RMID, 0);
-                    g_framebuffer = (uint32_t *)g_ximage->data;
-                }
-                
+                // Reallocate a correctly sized buffer (works for SHM and
+                // the plain XImage fallback alike — previously the fallback
+                // kept the old allocation and rendering would write past it)
+                x11_destroy_buffer();
+                x11_create_buffer();
                 term_resize(g_width, g_height);
             }
         } else if (ev.type == Expose) {
@@ -351,7 +380,18 @@ static int x11_poll_events(void) {
 }
 
 static void x11_set_title(const char *title) {
-    XStoreName(g_dpy, g_win, title);
+    static Atom atom_net_wm_name = None;
+    static Atom atom_utf8 = None;
+    if (atom_net_wm_name == None) {
+        atom_net_wm_name = XInternAtom(g_dpy, "_NET_WM_NAME", False);
+        atom_utf8 = XInternAtom(g_dpy, "UTF8_STRING", False);
+    }
+    XStoreName(g_dpy, g_win, title); // legacy WM_NAME
+    if (atom_net_wm_name != None && atom_utf8 != None) {
+        XChangeProperty(g_dpy, g_win, atom_net_wm_name, atom_utf8, 8,
+                        PropModeReplace, (const unsigned char *)title,
+                        (int)strlen(title));
+    }
 }
 
 static int x11_get_fd(void) {

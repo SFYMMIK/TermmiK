@@ -59,6 +59,19 @@ static int starts_with(const char *str, const char *prefix, int len) {
     return prefix[len] == 0;
 }
 
+// "TermmiK: config line N: unknown key '<key>' ignored"
+static void warn_unknown_key(int line_no, const char *key, int key_len) {
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg), "TermmiK: config line %d: unknown key '", line_no);
+    for (int kc = 0; kc < key_len && n < (int)sizeof(msg) - 12; kc++) {
+        char ch = key[kc];
+        if (ch < 32 || ch > 126) ch = '?';
+        msg[n++] = ch;
+    }
+    snprintf(msg + n, sizeof(msg) - n, "' ignored\n");
+    my_print(msg);
+}
+
 static uint32_t parse_hex(const char *str, int len) {
     if (len > 0 && str[0] == '#') { str++; len--; }
     uint32_t val = 0;
@@ -129,7 +142,6 @@ void config_load(void) {
     g_config.cursor_color = 0xFFFFFF;
     g_config.cursor_shape = 0;
     g_config.cursor_blink = 2;
-    g_config.cursor_trail = 0;
     g_config.scrollback_lines = 10000;
     g_config.mouse_scroll_step = 3;
     g_config.selection_fg_set = 0;
@@ -258,7 +270,12 @@ void config_load(void) {
             } else if (starts_with(k, "cursor_blink", key_len)) {
                 g_config.cursor_blink = parse_int(v, val_len);
             } else if (starts_with(k, "cursor_trail", key_len)) {
-                g_config.cursor_trail = parse_int(v, val_len);
+                // Removed option — warn so old configs don't wonder
+                char msg[128];
+                snprintf(msg, sizeof(msg),
+                         "TermmiK: config line %d: cursor_trail was removed "
+                         "(no cursor animations); option ignored\n", line_no);
+                my_print(msg);
             } else if (starts_with(k, "scrollback_lines", key_len)) {
                 g_config.scrollback_lines = parse_int(v, val_len);
             } else if (starts_with(k, "mouse_scroll_step", key_len)) {
@@ -342,21 +359,22 @@ void config_load(void) {
                 g_config.fg_color = parse_hex(v, val_len);
             } else if (starts_with(k, "background", key_len)) {
                 g_config.bg_color = parse_hex(v, val_len);
-            } else if (starts_with(k, "color", 5) && key_len <= 7) {
-                int idx = parse_int(k + 5, key_len - 5);
-                if (idx >= 0 && idx < 16) {
+            } else if (key_len >= 6 && key_len <= 7 && memcmp(k, "color", 5) == 0) {
+                // color0..color15 — the suffix must be digits (rejects typos
+                // like "colors" instead of silently hitting color0)
+                int idx = 0, ok = 1;
+                for (int d = 5; d < key_len; d++) {
+                    if (k[d] < '0' || k[d] > '9') { ok = 0; break; }
+                    idx = idx * 10 + (k[d] - '0');
+                }
+                if (ok && idx < 16) {
                     g_config.colors[idx] = parse_hex(v, val_len);
+                } else {
+                    warn_unknown_key(line_no, k, key_len);
                 }
             } else {
                 // Unknown key — likely a typo or a newer config format
-                char msg[128];
-                int n = snprintf(msg, sizeof(msg),
-                                 "TermmiK: config line %d: unknown key '", line_no);
-                for (int kc = 0; kc < key_len && n < (int)sizeof(msg) - 12; kc++) {
-                    msg[n++] = k[kc];
-                }
-                snprintf(msg + n, sizeof(msg) - n, "' ignored\n");
-                my_print(msg);
+                warn_unknown_key(line_no, k, key_len);
             }
         }
         }

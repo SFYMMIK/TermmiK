@@ -47,7 +47,6 @@ static struct wl_pointer *wl_pointer = NULL;
 static struct wl_surface *wl_surface = NULL;
 static struct xdg_surface *xdg_surface = NULL;
 static struct xdg_toplevel *xdg_toplevel = NULL;
-static struct wl_buffer *wl_buffer = NULL;
 
 // Pointer cursor (Wayland clients own their cursor images — without this the
 // compositor shows no cursor while the pointer is over the window)
@@ -152,6 +151,32 @@ static const char *resolve_cursor_theme(char *name_out, int name_len, int *size_
 static int shm_fd = -1;
 static uint32_t *shm_data = NULL;
 static int pool_size = 0;
+
+// Two buffers, alternated on every commit. Rendering into the buffer the
+// compositor is still scanning out causes tearing; the release event tells
+// us a buffer is free again. With both busy we stay on the current buffer
+// (progress over perfection for a terminal).
+#define WAYLAND_NUM_BUFFERS 2
+
+typedef struct {
+    struct wl_buffer *buffer;
+    uint32_t *data;
+    int busy;
+} ShmBuffer;
+
+static ShmBuffer shm_buffers[WAYLAND_NUM_BUFFERS];
+static int current_buffer = 0;
+
+static uint32_t compositor_version = 0;
+
+static void shm_buffer_release(void *data, struct wl_buffer *wl_buffer) {
+    (void)wl_buffer;
+    ((ShmBuffer *)data)->busy = 0;
+}
+
+static const struct wl_buffer_listener shm_buffer_listener = {
+    .release = shm_buffer_release,
+};
 
 static struct xkb_context *xkb_context = NULL;
 static struct xkb_keymap *xkb_keymap = NULL;
@@ -289,40 +314,74 @@ static int create_shm_file(int size) {
     return fd;
 }
 
-static void resize_shm_pool(int width, int height) {
-    int stride = width * 4;
-    int size = stride * height;
-    if (size <= pool_size) return;
-    
-    if (shm_fd >= 0) {
-        munmap(shm_data, pool_size);
-        close(shm_fd);
+static void destroy_shm_buffers(void) {
+    for (int i = 0; i < WAYLAND_NUM_BUFFERS; i++) {
+        if (shm_buffers[i].buffer) {
+            wl_buffer_destroy(shm_buffers[i].buffer);
+        }
+        shm_buffers[i].buffer = NULL;
+        shm_buffers[i].data = NULL;
+        shm_buffers[i].busy = 0;
     }
-    
-    shm_fd = create_shm_file(size);
-    shm_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    pool_size = size;
+    current_buffer = 0;
+    g_framebuffer = NULL;
 }
 
-static void create_buffer(int width, int height) {
-    if (wl_buffer) {
-        wl_buffer_destroy(wl_buffer);
-        wl_buffer = NULL;
+// (Re)create the SHM pool and both scanout buffers for the current size.
+static int create_shm_buffers(int width, int height) {
+    destroy_shm_buffers();
+    if (!wl_shm || width <= 0 || height <= 0) return -1;
+
+    int stride = width * 4;
+    int size = stride * height;
+    int total = size * WAYLAND_NUM_BUFFERS;
+
+    if (total > pool_size) {
+        if (shm_fd >= 0) {
+            if (shm_data) munmap(shm_data, pool_size);
+            close(shm_fd);
+            shm_data = NULL;
+            shm_fd = -1;
+            pool_size = 0;
+        }
+        shm_fd = create_shm_file(total);
+        if (shm_fd < 0) return -1;
+        shm_data = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+        if (shm_data == MAP_FAILED) {
+            shm_data = NULL;
+            close(shm_fd);
+            shm_fd = -1;
+            return -1;
+        }
+        pool_size = total;
     }
-    
-    resize_shm_pool(width, height);
-    
+
     struct wl_shm_pool *pool = wl_shm_create_pool(wl_shm, shm_fd, pool_size);
-    wl_buffer = wl_shm_pool_create_buffer(pool, 0, width, height, width * 4, WL_SHM_FORMAT_ARGB8888);
+    if (!pool) return -1;
+    for (int i = 0; i < WAYLAND_NUM_BUFFERS; i++) {
+        shm_buffers[i].buffer = wl_shm_pool_create_buffer(pool, i * size, width, height,
+                                                          stride, WL_SHM_FORMAT_ARGB8888);
+        if (!shm_buffers[i].buffer) {
+            wl_shm_pool_destroy(pool);
+            destroy_shm_buffers();
+            return -1;
+        }
+        shm_buffers[i].data = (uint32_t *)((unsigned char *)shm_data + i * size);
+        shm_buffers[i].busy = 0;
+        wl_buffer_add_listener(shm_buffers[i].buffer, &shm_buffer_listener, &shm_buffers[i]);
+    }
     wl_shm_pool_destroy(pool);
-    g_framebuffer = shm_data;
+
+    current_buffer = 0;
+    g_framebuffer = shm_buffers[0].data;
+    return 0;
 }
 
 static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
     xdg_surface_ack_configure(xdg_surface, serial);
     
-    if (!wl_buffer) {
-        create_buffer(g_width, g_height);
+    if (!shm_buffers[current_buffer].buffer) {
+        create_shm_buffers(g_width, g_height);
     }
 }
 
@@ -335,8 +394,11 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel
         if (width != g_width || height != g_height) {
             g_width = width;
             g_height = height;
-            create_buffer(g_width, g_height);
-            term_resize(g_width, g_height);
+            // Resize the buffer set first; the text grid follows. If the
+            // allocation fails, rendering stays paused (no framebuffer).
+            if (create_shm_buffers(g_width, g_height) == 0) {
+                term_resize(g_width, g_height);
+            }
         }
     }
 }
@@ -365,10 +427,21 @@ static void keyboard_keymap(void *data, struct wl_keyboard *wl_keyboard, uint32_
     }
     char *map_str = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map_str != MAP_FAILED) {
-        xkb_keymap = xkb_keymap_new_from_string(xkb_context, map_str, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+        // Replace (never leak) the previous keymap — compositors send a new
+        // one whenever the layout changes
+        struct xkb_keymap *new_keymap = xkb_keymap_new_from_string(
+            xkb_context, map_str, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
         munmap(map_str, size);
-        if (xkb_keymap) {
-            xkb_state = xkb_state_new(xkb_keymap);
+        if (new_keymap) {
+            struct xkb_state *new_state = xkb_state_new(new_keymap);
+            if (new_state) {
+                if (xkb_state) xkb_state_unref(xkb_state);
+                if (xkb_keymap) xkb_keymap_unref(xkb_keymap);
+                xkb_keymap = new_keymap;
+                xkb_state = new_state;
+            } else {
+                xkb_keymap_unref(new_keymap);
+            }
         }
     }
     close(fd);
@@ -601,13 +674,22 @@ static const struct wl_pointer_listener pointer_listener = {
 };
 
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities) {
-    if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) {
+    // The compositor can add/remove devices at runtime; recreate only what
+    // actually changed instead of leaking duplicate proxies
+    if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !wl_keyboard) {
         wl_keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(wl_keyboard, &keyboard_listener, NULL);
+    } else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && wl_keyboard) {
+        key_repeat_stop();
+        wl_keyboard_destroy(wl_keyboard);
+        wl_keyboard = NULL;
     }
-    if (capabilities & WL_SEAT_CAPABILITY_POINTER) {
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !wl_pointer) {
         wl_pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(wl_pointer, &pointer_listener, NULL);
+    } else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && wl_pointer) {
+        wl_pointer_destroy(wl_pointer);
+        wl_pointer = NULL;
     }
 }
 
@@ -639,22 +721,28 @@ static const struct wl_output_listener output_listener = {
 };
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface, uint32_t version) {
+    // Bind min(advertised, supported) — binding a higher version than the
+    // compositor offers is a protocol error that would disconnect us.
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        wl_compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+        compositor_version = version < 4 ? version : 4;
+        if (compositor_version < 1) compositor_version = 1;
+        wl_compositor = wl_registry_bind(registry, name, &wl_compositor_interface, compositor_version);
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         xdg_wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
         xdg_wm_base_add_listener(xdg_wm_base, &xdg_wm_base_listener, NULL);
     } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
-        wl_data_device_manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, 3);
+        uint32_t v = version < 3 ? version : 3;
+        wl_data_device_manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, v < 1 ? 1 : v);
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
         wl_seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
         wl_seat_add_listener(wl_seat, &seat_listener, NULL);
     } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
         zxdg_decoration_manager = wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface, 1);
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
-        wl_output = wl_registry_bind(registry, name, &wl_output_interface, 2);
+        uint32_t v = version < 2 ? version : 2;
+        wl_output = wl_registry_bind(registry, name, &wl_output_interface, v < 1 ? 1 : v);
         wl_output_add_listener(wl_output, &output_listener, NULL);
     }
 }
@@ -702,6 +790,7 @@ static int wayland_init(const char *font_pattern) {
     xdg_toplevel = xdg_surface_get_toplevel(xdg_surface);
     xdg_toplevel_add_listener(xdg_toplevel, &xdg_toplevel_listener, NULL);
     xdg_toplevel_set_title(xdg_toplevel, "TermmiK");
+    xdg_toplevel_set_app_id(xdg_toplevel, "termmik");
 
     if (zxdg_decoration_manager) {
         struct zxdg_toplevel_decoration_v1 *decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(zxdg_decoration_manager, xdg_toplevel);
@@ -723,7 +812,14 @@ static int wayland_init(const char *font_pattern) {
 }
 
 static void wayland_cleanup(void) {
-    if (wl_buffer) wl_buffer_destroy(wl_buffer);
+    destroy_shm_buffers();
+    if (shm_fd >= 0) {
+        if (shm_data) munmap(shm_data, pool_size);
+        close(shm_fd);
+        shm_fd = -1;
+        shm_data = NULL;
+        pool_size = 0;
+    }
     if (xdg_toplevel) xdg_toplevel_destroy(xdg_toplevel);
     if (xdg_surface) xdg_surface_destroy(xdg_surface);
     if (cursor_surface) wl_surface_destroy(cursor_surface);
@@ -770,11 +866,28 @@ static void wayland_set_title(const char *title) {
 }
 
 static void wayland_flush(void) {
-    if (!wl_buffer) return;
-    wl_surface_attach(wl_surface, wl_buffer, 0, 0);
-    wl_surface_damage_buffer(wl_surface, 0, 0, g_width, g_height);
+    ShmBuffer *buf = &shm_buffers[current_buffer];
+    if (!buf->buffer) return;
+    wl_surface_attach(wl_surface, buf->buffer, 0, 0);
+    if (compositor_version >= 4) {
+        wl_surface_damage_buffer(wl_surface, 0, 0, g_width, g_height);
+    } else {
+        // Older compositors: surface-local damage only (buffer damage is
+        // protocol version 4+)
+        wl_surface_damage(wl_surface, 0, 0, g_width, g_height);
+    }
     wl_surface_commit(wl_surface);
     wl_display_flush(wl_display);
+    buf->busy = 1;
+
+    // Hand the next frame the other buffer if the compositor has released
+    // it — writing while it scans out would tear. When both are still busy
+    // (slow compositor, burst of output) we keep the current buffer.
+    int next = 1 - current_buffer;
+    if (shm_buffers[next].buffer && !shm_buffers[next].busy) {
+        current_buffer = next;
+    }
+    g_framebuffer = shm_buffers[current_buffer].data;
 }
 
 static int wayland_get_timer_fd(void) { return key_repeat_fd; }

@@ -36,7 +36,6 @@ int g_width = 80 * 9;
 int g_height = 24 * 18;
 uint32_t *g_framebuffer = NULL;
 
-#define TRAIL_FRAME_MS 12 // ~80fps while the cursor trail animates
 #define CURSOR_BLINK_INTERVAL_MS 300 // fixed blink cadence
 
 int g_pty_fd = -1;
@@ -447,10 +446,9 @@ int main(int argc, char **argv) {
         nfds = 3;
     }
 
-    char buf[4096];
+    char buf[65536];
     struct timespec last_scroll_time = {0};
     int64_t last_activity_ms = 0;
-    int64_t trail_last_active_ms = 0; // last time the cursor glide animated
 
     while (1) {
         int timeout = -1;
@@ -458,13 +456,6 @@ int main(int argc, char **argv) {
             timeout = 100;
         } else if (g_config.cursor_blink == 1) {
             timeout = CURSOR_BLINK_INTERVAL_MS;
-        }
-        // Keep ticking frames while the cursor trail animates
-        if (cursor_trail_active()) {
-            trail_last_active_ms = bell_now_ms();
-            if (timeout < 0 || timeout > TRAIL_FRAME_MS) {
-                timeout = TRAIL_FRAME_MS;
-            }
         }
         // Wake up when the visual bell flash should end
         if (g_bell_flash_until) {
@@ -484,31 +475,19 @@ int main(int argc, char **argv) {
         }
 
         if (poll_result == 0) {
-            if (cursor_trail_active()) {
-                needs_render = 1; // animation frame
-            } else if (g_config.cursor_blink == 1 && !g_select_dragging) {
-                // Blink only while the cursor is still: never toggle on/off
-                // while typing (the trail was animating recently). The cursor
-                // stays solid during the animation and for one blink interval
-                // after it settles.
-                if (bell_now_ms() - trail_last_active_ms < CURSOR_BLINK_INTERVAL_MS) {
+            if (g_config.cursor_blink == 1 && !g_select_dragging) {
+                // Blink only while the cursor is still and the user hasn't
+                // been idle beyond cursor_stop_blinking_after (solid then).
+                float stop_after = g_config.cursor_stop_blinking_after;
+                int64_t idle = bell_now_ms() - last_activity_ms;
+                if (stop_after > 0 && idle >= (int64_t)(stop_after * 1000.0f)) {
                     if (!g_cursor_blink_on) {
                         g_cursor_blink_on = 1;
                         needs_render = 1;
                     }
                 } else {
-                    // Stop blinking (solid cursor) after cursor_stop_blinking_after
-                    float stop_after = g_config.cursor_stop_blinking_after;
-                    int64_t idle = bell_now_ms() - last_activity_ms;
-                    if (stop_after > 0 && idle >= (int64_t)(stop_after * 1000.0f)) {
-                        if (!g_cursor_blink_on) {
-                            g_cursor_blink_on = 1;
-                            needs_render = 1;
-                        }
-                    } else {
-                        g_cursor_blink_on = !g_cursor_blink_on;
-                        needs_render = 1;
-                    }
+                    g_cursor_blink_on = !g_cursor_blink_on;
+                    needs_render = 1;
                 }
             }
         } else {
@@ -548,20 +527,26 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (fds[1].revents & POLLIN) {
+        if (fds[1].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) {
             if (g_backend->poll_events() < 0) break;
         }
-        if (nfds == 3 && (fds[2].revents & POLLIN)) {
+        if (nfds == 3 && (fds[2].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
             if (g_backend->handle_timer) g_backend->handle_timer();
         }
 
         if (fds[0].revents & POLLIN) {
             ssize_t bytes = pty_read(g_pty_fd, buf, sizeof(buf));
-            if (bytes <= 0) break; // Child died
-            vt_state.scroll_offset = 0;
-            vt_process(&vt_state, buf, bytes);
-            needs_render = 1;
-        } else if (fds[0].revents & (POLLHUP | POLLERR)) {
+            if (bytes > 0) {
+                vt_state.scroll_offset = 0;
+                vt_process(&vt_state, buf, bytes);
+                needs_render = 1;
+            } else if (bytes == 0) {
+                break; // Child died
+            } else if (errno != EINTR) {
+                break; // Real read error
+            }
+            // EINTR: fall through so a pending frame still gets rendered
+        } else if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
             break;
         }
 

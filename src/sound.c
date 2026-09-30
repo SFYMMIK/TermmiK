@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <math.h>
 
 #ifndef DISABLE_SOUND
@@ -121,7 +122,8 @@ void sound_init(void) {
 
     int rate = 48000;
     if (channels == 0) channels = 1;
-    int err = snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
+    // Non-blocking writes: a full ALSA buffer must never stall key input.
+    int err = snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
     if (err < 0) { warn_once("TermmiK: could not open ALSA device"); return; }
     err = snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
                              channels, rate, 1, 50000 /* 50ms latency */);
@@ -137,6 +139,7 @@ void sound_init(void) {
 void sound_play_key(void) {
     if (!enabled || !pcm) return;
     long r = snd_pcm_writei(pcm, samples, sample_frames);
+    if (r == -EAGAIN || r == -EBUSY) return; // buffer full — drop, never block
     if (r < 0) {
         // Underrun between keystrokes — prepare and retry once
         snd_pcm_prepare(pcm);

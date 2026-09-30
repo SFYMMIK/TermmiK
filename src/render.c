@@ -553,95 +553,6 @@ static void synth_glyph(uint32_t cp, unsigned char *bm, int w, int h) {
 }
 
 
-// ---------------------------------------------------------------------------
-// Animated cursor trail (kitty-style): when the logical cursor jumps, the
-// block cursor glides from its previous position to the new one with an
-// ease-out curve, leaving a fading smear. Purely cosmetic — render_draw
-// detects the move, the main loop ticks frames at ~80 fps while active.
-// ---------------------------------------------------------------------------
-#define TRAIL_DURATION_MS 60
-
-static int trail_active = 0;
-static int64_t trail_start = 0, trail_end = 0;
-static float trail_from_x = 0, trail_from_y = 0; // cell coords (float)
-static float trail_to_x = 0, trail_to_y = 0;
-static int last_cursor_x = -1, last_cursor_y = -1;
-
-int cursor_trail_active(void) { return trail_active; }
-
-static void fill_solid_rect(uint32_t *fb, int x0, int y0, int x1, int y1, uint32_t color) {
-    for (int y = y0; y < y1; y++) {
-        if (y < 0 || y >= g_height) continue;
-        for (int x = x0; x < x1; x++) {
-            if (x < 0 || x >= g_width) continue;
-            fb[y * g_width + x] = color;
-        }
-    }
-}
-
-static void blend_rect(uint32_t *fb, int x0, int y0, int x1, int y1, uint32_t color, uint32_t alpha) {
-    if (alpha == 0) return;
-    uint32_t r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = color & 0xFF;
-    for (int y = y0; y < y1; y++) {
-        if (y < 0 || y >= g_height) continue;
-        for (int x = x0; x < x1; x++) {
-            if (x < 0 || x >= g_width) continue;
-            uint32_t px = fb[y * g_width + x];
-            uint32_t dr = (px >> 16) & 0xFF, dg = (px >> 8) & 0xFF, db = px & 0xFF;
-            uint32_t da = (px >> 24) & 0xFF;
-            uint32_t orr = div255(r * alpha + dr * (255 - alpha));
-            uint32_t og = div255(g * alpha + dg * (255 - alpha));
-            uint32_t ob = div255(b * alpha + db * (255 - alpha));
-            uint32_t oa = alpha + div255(da * (255 - alpha));
-            fb[y * g_width + x] = (oa << 24) | (orr << 16) | (og << 8) | ob;
-        }
-    }
-}
-
-// Draw the configured cursor shape (block/underline/bar) at a pixel position.
-// alpha 255 = solid, lower = translucent (trail ghosts).
-static void draw_cursor_shape_at(int px, int py, uint32_t color, uint32_t alpha) {
-    if (g_config.cursor_shape == 1) {
-        // Underline: strip along the bottom of the cell
-        int uy = py + g_cell_height - 2;
-        if (uy < py) uy = py;
-        if (alpha >= 255) fill_solid_rect(g_framebuffer, px, uy, px + g_cell_width, uy + 2, color | 0xFF000000);
-        else blend_rect(g_framebuffer, px, uy, px + g_cell_width, uy + 2, color, alpha);
-    } else if (g_config.cursor_shape == 2) {
-        // Bar: strip along the left edge of the cell
-        if (alpha >= 255) fill_solid_rect(g_framebuffer, px, py, px + 2, py + g_cell_height, color | 0xFF000000);
-        else blend_rect(g_framebuffer, px, py, px + 2, py + g_cell_height, color, alpha);
-    } else {
-        // Block: the whole cell
-        if (alpha >= 255) fill_solid_rect(g_framebuffer, px, py, px + g_cell_width, py + g_cell_height, color | 0xFF000000);
-        else blend_rect(g_framebuffer, px, py, px + g_cell_width, py + g_cell_height, color, alpha);
-    }
-}
-
-// Blit a cached glyph at an arbitrary pixel position (used by the trail so
-// the character rides the cursor)
-static void blit_glyph_at(const Glyph *b, int base_x, int base_y, uint32_t fg) {
-    int yoff = b->yoff + g_baseline;
-    uint32_t fr = (fg >> 16) & 0xFF, fgc = (fg >> 8) & 0xFF, fb2 = fg & 0xFF;
-    for (int cy = 0; cy < b->h; cy++) {
-        for (int cx = 0; cx < b->w; cx++) {
-            unsigned char a = gamma_table[b->bitmap[cy * b->w + cx]];
-            if (!a) continue;
-            int sx = base_x + b->xoff + cx;
-            int sy = base_y + yoff + cy;
-            if (sx < 0 || sx >= g_width || sy < 0 || sy >= g_height) continue;
-            uint32_t dst = g_framebuffer[sy * g_width + sx];
-            uint32_t dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
-            uint32_t da = (dst >> 24) & 0xFF;
-            uint32_t orr = div255(fr * a + dr * (255 - a));
-            uint32_t og = div255(fgc * a + dg * (255 - a));
-            uint32_t ob = div255(fb2 * a + db * (255 - a));
-            uint32_t oa = a + div255(da * (255 - a));
-            g_framebuffer[sy * g_width + sx] = (oa << 24) | (orr << 16) | (og << 8) | ob;
-        }
-    }
-}
-
 static void draw_kitty_images(VTState *state, uint32_t *fb, int z_limit, int dir) {
     if (!state->kitty_placements) return;
     
@@ -718,68 +629,13 @@ void render_draw(VTState *state) {
 
     if (!g_framebuffer) return;
 
-    static uint32_t *shadow_buffer = NULL;
-    static int shadow_w = 0, shadow_h = 0;
-    if (shadow_w != g_width || shadow_h != g_height || !shadow_buffer) {
-        if (shadow_buffer) my_free(shadow_buffer);
-        shadow_buffer = my_malloc(g_width * g_height * 4);
-        if (!shadow_buffer) {
-            shadow_w = 0;
-            shadow_h = 0;
-            return;
-        }
-        shadow_w = g_width;
-        shadow_h = g_height;
-        // Reset trail state on window resize
-        trail_active = 0;
-        last_cursor_x = -1;
-        last_cursor_y = -1;
-    }
-    uint32_t *real_fb = g_framebuffer;
-    uint32_t *g_framebuffer = shadow_buffer;
-
-    // Cursor trail: detect a cursor jump and (re)start the glide animation
-    // cursor_blink tri-state: 0 = no cursor at all, 1 = blinking (respects
-    // the application's ?25 visibility), 2 = steady and always visible.
+    // Cursor visibility: cursor_blink is tri-state — 0 = no cursor at all,
+    // 1 = blinking (respects the application's ?25 visibility), 2 = steady
+    // and always visible.
     int cursor_shown_now;
     if (g_config.cursor_blink == 0) cursor_shown_now = 0;
     else if (g_config.cursor_blink == 2) cursor_shown_now = 1;
     else cursor_shown_now = state->cursor_visible && g_cursor_blink_on;
-    int trail_on = g_config.cursor_trail &&
-                   state->scroll_offset == 0 && cursor_shown_now;
-    if (state->cursor_x != last_cursor_x || state->cursor_y != last_cursor_y) {
-        if (trail_on && last_cursor_x >= 0) {
-            float fx = last_cursor_x, fy = last_cursor_y;
-            if (trail_active) {
-                // Retarget from wherever the animation currently is
-                float t = (bell_now_ms() - trail_start) / (float)(trail_end - trail_start);
-                if (t < 0) t = 0;
-                if (t > 1) t = 1;
-                float e = 1 - (1 - t) * (1 - t);
-                fx = trail_from_x + (trail_to_x - trail_from_x) * e;
-                fy = trail_from_y + (trail_to_y - trail_from_y) * e;
-            }
-            trail_from_x = fx;
-            trail_from_y = fy;
-            // Clamp: at wrap-pending cursor_x == cols, which would draw the
-            // glide one cell past the right edge (and read cells out of bounds)
-            trail_to_x = state->cursor_x < state->cols ? state->cursor_x : state->cols - 1;
-            trail_to_y = state->cursor_y < state->rows ? state->cursor_y : state->rows - 1;
-            trail_start = bell_now_ms();
-            trail_end = trail_start + TRAIL_DURATION_MS;
-            trail_active = 1;
-        }
-        last_cursor_x = state->cursor_x;
-        last_cursor_y = state->cursor_y;
-    }
-    // Expire BEFORE capturing trail_now: otherwise the final frame suppresses
-    // the real cursor without drawing the animated one, and the main loop
-    // stops ticking — the cursor would vanish until the next input event.
-    // Scrolling also snaps the animation (its offsets would be stale).
-    if (trail_active && (bell_now_ms() >= trail_end || state->scroll_offset != 0)) {
-        trail_active = 0;
-    }
-    int trail_now = trail_active;
 
     uint32_t alpha = (uint32_t)(g_config.opacity * 255.0f);
     if (alpha > 255) alpha = 255;
@@ -862,13 +718,7 @@ void render_draw(VTState *state) {
                 fg = g_config.selection_fg_set ? g_config.selection_foreground : c.bg_color;
             }
             
-            extern int g_cursor_blink_on;
-            int cursor_shown;
-            if (g_config.cursor_blink == 0) cursor_shown = 0;
-            else if (g_config.cursor_blink == 2) cursor_shown = 1;
-            else cursor_shown = state->cursor_visible && g_cursor_blink_on;
-            int is_cursor = (cursor_shown && logical_y == state->cursor_y && x == state->cursor_x);
-            if (trail_now) is_cursor = 0; // the animated block replaces it
+            int is_cursor = (cursor_shown_now && logical_y == state->cursor_y && x == state->cursor_x);
             if (is_cursor && g_config.cursor_shape == 0) {
                 bg = g_config.cursor_color;
                 fg = g_config.cursor_text_color_set ? g_config.cursor_text_color : c.bg_color;
@@ -940,6 +790,7 @@ void render_draw(VTState *state) {
                 
                 if (b && b->bitmap && c.char_code != ' ') {
                     int passes = (cattrs & CELL_BOLD) ? 2 : 1;
+                    uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
                     for (int pass = 0; pass < passes; pass++) {
                         int w = b->w; int h = b->h;
                         int xoff = b->xoff; int yoff = b->yoff + g_baseline;
@@ -953,22 +804,24 @@ void render_draw(VTState *state) {
                             if (cattrs & CELL_ITALIC) {
                                 shear = (g_baseline - (b->yoff + cy)) / 3;
                             }
+                            int pY = start_y + yoff + cy;
+                            if (pY < 0 || pY >= g_height) continue;
+                            const unsigned char *src_row = b->bitmap + cy * w;
+                            uint32_t *dst_row = g_framebuffer + pY * g_width;
                             for (int cx = 0; cx < max_cx; cx++) {
                                 int pX = start_x + xoff + cx + shear + pass;
-                                int pY = start_y + yoff + cy;
-                                if (pX >= 0 && pX < g_width && pY >= 0 && pY < g_height) {
-                                    unsigned char alpha = gamma_table[b->bitmap[cy * w + cx]];
+                                if (pX >= 0 && pX < g_width) {
+                                    unsigned char alpha = gamma_table[src_row[cx]];
                                     if (cattrs & CELL_DIM) alpha = (alpha * 2) / 3;
                                     if (alpha > 0) {
-                                        uint32_t dst = g_framebuffer[pY * g_width + pX];
-                                        uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
+                                        uint32_t dst = dst_row[pX];
                                         uint32_t bg_r = (dst >> 16) & 0xFF, bg_g = (dst >> 8) & 0xFF, bg_b = dst & 0xFF;
                                         uint32_t dst_a = (dst >> 24) & 0xFF;
                                         uint32_t r = div255(fg_r * alpha + bg_r * (255 - alpha));
                                         uint32_t g2 = div255(fg_g * alpha + bg_g * (255 - alpha));
                                         uint32_t b2 = div255(fg_b * alpha + bg_b * (255 - alpha));
                                         uint32_t new_a = alpha + div255(dst_a * (255 - alpha));
-                                        g_framebuffer[pY * g_width + pX] = (new_a << 24) | (r << 16) | (g2 << 8) | b2;
+                                        dst_row[pX] = (new_a << 24) | (r << 16) | (g2 << 8) | b2;
                                     }
                                 }
                             }
@@ -977,7 +830,8 @@ void render_draw(VTState *state) {
                 }
             }
 
-            // Underline / strikethrough decorations (skip on trail halves)
+            // Underline / strikethrough decorations (wide chars draw them
+            // across the full two-cell span; the trailing half is skipped)
             if (!(cattrs & CELL_TRAIL) && fg != bg && (cattrs & (CELL_UNDERLINE | CELL_STRIKE))) {
                 int t = line_thickness(g_cell_height);
                 if (cattrs & CELL_UNDERLINE) {
@@ -1031,63 +885,6 @@ void render_draw(VTState *state) {
         }
     }
     
-    // Animated cursor trail: glide cursor + fading trail + riding glyph
-    if (trail_now) {
-        float t = (bell_now_ms() - trail_start) / (float)(trail_end - trail_start);
-        if (t < 0) t = 0;
-        if (t >= 1) {
-            trail_active = 0;
-        } else {
-            float e = 1 - (1 - t) * (1 - t); // ease-out quad
-            float ax = trail_from_x + (trail_to_x - trail_from_x) * e;
-            float ay = trail_from_y + (trail_to_y - trail_from_y) * e;
-            int px = g_config.padding_left + (int)(ax * g_cell_width);
-            int py = g_config.padding_top + (int)(ay * g_cell_height);
-            int fx = g_config.padding_left + (int)(trail_from_x * g_cell_width);
-            int fy = g_config.padding_top + (int)(trail_from_y * g_cell_height);
-            uint32_t cc = g_config.cursor_color;
-
-            int tail_alpha = (int)(110 * (1 - e));
-            if (tail_alpha > 0) {
-                if (g_config.cursor_shape == 0) {
-                    // Block: one smeared bounding box from origin to here
-                    int x0 = px < fx ? px : fx;
-                    int y0 = py < fy ? py : fy;
-                    int x1 = (px > fx ? px : fx) + g_cell_width;
-                    int y1 = (py > fy ? py : fy) + g_cell_height;
-                    blend_rect(g_framebuffer, x0, y0, x1, y1, cc, tail_alpha);
-                } else {
-                    // Underline / bar: fading ghost copies along the path
-                    for (int gi = 1; gi <= 2; gi++) {
-                        float gt = e * gi / 3.0f;
-                        int gx = fx + (int)((px - fx) * gt);
-                        int gy = fy + (int)((py - fy) * gt);
-                        draw_cursor_shape_at(gx, gy, cc, (uint32_t)(tail_alpha * (3 - gi) / 3));
-                    }
-                }
-            }
-
-            // The moving cursor itself
-            draw_cursor_shape_at(px, py, cc, 255);
-
-            // The destination character rides the cursor (block only)
-            if (g_config.cursor_shape == 0 &&
-                state->cursor_x < state->cols && state->cursor_y < state->rows) {
-                Cell cc2 = state->cells[state->cursor_y * state->cols + state->cursor_x];
-                if (!(cc2.attrs & (CELL_WIDE | CELL_TRAIL)) &&
-                    cc2.char_code >= 32 && cc2.char_code < GLYPH_CACHE_SIZE) {
-                    Glyph *b = &g_glyph_cache[cc2.char_code];
-                    if (b->bitmap && b->w > 1) {
-                        uint32_t textfg = g_config.cursor_text_color_set
-                                              ? g_config.cursor_text_color
-                                              : cc2.bg_color;
-                        blit_glyph_at(b, px, py, textfg);
-                    }
-                }
-            }
-        }
-    }
-
     draw_kitty_images(state, g_framebuffer, 0, 1);
 
     // Visual bell flash: overlay the foreground color, fading out
@@ -1114,6 +911,4 @@ void render_draw(VTState *state) {
             }
         }
     }
-    
-    memcpy(real_fb, shadow_buffer, g_width * g_height * 4);
 }

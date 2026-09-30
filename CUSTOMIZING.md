@@ -27,7 +27,7 @@ cursor_color=#00FF00
 
 Fonts are rasterized in-process (`stb_truetype`) — no fontconfig rendering stack, no Pango/Cairo. Box drawing, block elements and DEC line art are **synthesized procedurally** to fill the whole cell, so TUI frames connect perfectly with any font.
 
-## 2. The cursor: block, bar, blink, glide
+## 2. The cursor: block, bar, blink
 
 ```ini
 # Shape: 0 = block (█), 1 = underline (▁), 2 = bar (|)
@@ -38,9 +38,6 @@ cursor_blink=1
 
 # While blinking: go solid after N seconds of idleness
 cursor_stop_blinking_after=15
-
-# Animated trail: the cursor glides to its new position with a fading trail
-cursor_trail=1
 
 # Text color under a block cursor (otherwise inverted)
 cursor_text_color=#101014

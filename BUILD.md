@@ -30,7 +30,7 @@ Before compiling, ensure you have a C compiler (`gcc` or `clang`), `make`, and t
 sudo apt install build-essential musl-tools libfontconfig1-dev
 
 # X11 Support (Optional but default)
-sudo apt install libx11-dev libxext-dev libxrandr-dev
+sudo apt install libx11-dev libxext-dev
 
 # Wayland Support (Optional but default)
 sudo apt install libwayland-dev libxkbcommon-dev
@@ -42,7 +42,7 @@ sudo apt install libwayland-dev libxkbcommon-dev
 sudo pacman -S base-devel musl fontconfig
 
 # X11 Support
-sudo pacman -S libx11 libxext libxrandr
+sudo pacman -S libx11 libxext
 
 # Wayland Support
 sudo pacman -S wayland libxkbcommon
@@ -70,7 +70,16 @@ make CC="musl-gcc -static"
 
 ### Advanced Compilation Flags
 
-You can optimize the binary size even further by strictly compiling only the backend you intend to use.
+By default TermmiK is compiled for the exact CPU of the machine you build on (`-march=native`) — the AUR package does the same. If you want to build a portable binary instead (for another machine, a distro build box, or to redistribute it), turn it off:
+
+```bash
+make NATIVE=0
+```
+
+**Add extra compiler flags (here: raise the optimization level):**
+```bash
+make EXTRA_CFLAGS="-O3"
+```
 
 **Compile for Wayland ONLY (Disables X11 support):**
 ```bash

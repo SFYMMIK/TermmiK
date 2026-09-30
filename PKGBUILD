@@ -9,11 +9,16 @@ url="https://git.sfymmik.xyz/SfymmiK/TermmiK"
 license=('GPL3')
 
 # Everything needed to compile all possible backends
-makedepends=('git' 'make' 'gcc' 'fontconfig' 'libx11' 'libxrandr' 'libxext' 'wayland' 'libxkbcommon' 'alsa-lib')
+makedepends=('git' 'make' 'gcc' 'fontconfig' 'libx11' 'libxext' 'wayland' 'libxkbcommon' 'alsa-lib')
 
-source=("${pkgbase}::git+https://git.sfymmik.xyz/SfymmiK/TermmiK.git")
-# Fallback source (uncomment if the self-hosted instance is down)
-# source=("${pkgbase}::git+https://github.com/SFYMMIK/TermmiK.git")
+# Build tuned for the CPU of the machine running makepkg (-march=native),
+# which is what AUR user builds want. Set to 0 to build a portable binary
+# (e.g. when redistributing the resulting package to other machines).
+_native=1
+
+source=("${pkgbase}::git+https://github.com/SFYMMIK/TermmiK.git")
+# Fallback source (uncomment if GitHub is down)
+# source=("${pkgbase}::git+https://git.sfymmik.xyz/SfymmiK/TermmiK.git")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -30,35 +35,35 @@ prepare() {
 build() {
   # 1. Build Full (X11 + Wayland)
   cd "$srcdir/$pkgbase-full"
-  make
+  make NATIVE=$_native
 
   # 2. Build X11 Only
   cd "$srcdir/$pkgbase-x11"
-  make DISABLE_WAYLAND=1
+  make DISABLE_WAYLAND=1 NATIVE=$_native
 
   # 3. Build Wayland Only
   cd "$srcdir/$pkgbase-wayland"
-  make DISABLE_X11=1
+  make DISABLE_X11=1 NATIVE=$_native
 }
 
 package_termmik-git() {
   pkgdesc="A custom lightweight C-based terminal emulator (X11 and Wayland)"
-  depends=('glibc' 'fontconfig' 'libx11' 'libxrandr' 'libxext' 'wayland' 'libxkbcommon' 'alsa-lib')
+  depends=('glibc' 'fontconfig' 'libx11' 'libxext' 'wayland' 'libxkbcommon' 'alsa-lib')
   provides=('termmik')
   conflicts=('termmik' 'termmik-x11-git' 'termmik-wayland-git')
 
   cd "$pkgbase-full"
-  make DESTDIR="$pkgdir" PREFIX="/usr" install
+  make NATIVE=$_native DESTDIR="$pkgdir" PREFIX="/usr" install
 }
 
 package_termmik-x11-git() {
   pkgdesc="A custom lightweight C-based terminal emulator (X11 only)"
-  depends=('glibc' 'fontconfig' 'libx11' 'libxrandr' 'libxext' 'alsa-lib')
+  depends=('glibc' 'fontconfig' 'libx11' 'libxext' 'alsa-lib')
   provides=('termmik')
   conflicts=('termmik' 'termmik-git' 'termmik-wayland-git')
 
   cd "$pkgbase-x11"
-  make DISABLE_WAYLAND=1 DESTDIR="$pkgdir" PREFIX="/usr" install
+  make DISABLE_WAYLAND=1 NATIVE=$_native DESTDIR="$pkgdir" PREFIX="/usr" install
 }
 
 package_termmik-wayland-git() {
@@ -68,5 +73,5 @@ package_termmik-wayland-git() {
   conflicts=('termmik' 'termmik-git' 'termmik-x11-git')
 
   cd "$pkgbase-wayland"
-  make DISABLE_X11=1 DESTDIR="$pkgdir" PREFIX="/usr" install
+  make DISABLE_X11=1 NATIVE=$_native DESTDIR="$pkgdir" PREFIX="/usr" install
 }

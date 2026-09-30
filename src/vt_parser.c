@@ -42,6 +42,53 @@ static void kitty_log(const char *fmt, ...) {
     fclose(f);
 }
 
+// ---------------------------------------------------------------------------
+// Logical-line builder used by vt_resize to re-wrap the screen + history at
+// the new width. File-scope (not nested, so clang builds too).
+// ---------------------------------------------------------------------------
+typedef struct {
+    Cell *cells;
+    int len;
+    int cap;
+} LogLine;
+
+typedef struct {
+    LogLine *lines;
+    int num;
+    int cap;
+} LogBuilder;
+
+static void log_add_line(LogBuilder *b) {
+    if (b->num >= b->cap) {
+        b->cap = b->cap == 0 ? 64 : b->cap * 2;
+        b->lines = my_realloc(b->lines, b->cap * sizeof(LogLine));
+    }
+    b->lines[b->num].cells = NULL;
+    b->lines[b->num].len = 0;
+    b->lines[b->num].cap = 0;
+    b->num++;
+}
+
+static void log_append_cell(LogBuilder *b, Cell c) {
+    if (b->num == 0) log_add_line(b);
+    LogLine *ll = &b->lines[b->num - 1];
+    if (ll->len >= ll->cap) {
+        ll->cap = ll->cap == 0 ? 128 : ll->cap * 2;
+        ll->cells = my_realloc(ll->cells, ll->cap * sizeof(Cell));
+    }
+    ll->cells[ll->len++] = c;
+}
+
+static void log_builder_free(LogBuilder *b) {
+    for (int i = 0; i < b->num; i++) {
+        if (b->lines[i].cells) my_free(b->lines[i].cells);
+    }
+    if (b->lines) my_free(b->lines);
+    b->lines = NULL;
+    b->num = 0;
+    b->cap = 0;
+}
+
 void vt_resize(VTState *state, int new_rows, int new_cols) {
     if (new_rows <= 0 || new_cols <= 0) return;
     if (new_rows == state->rows && new_cols == state->cols) return;
@@ -53,36 +100,14 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     empty_cell.wrapped = 0;
     empty_cell.attrs = 0;
 
-    typedef struct {
-        Cell *cells;
-        int len;
-        int cap;
-    } LogLine;
-    
-    LogLine *lines = NULL;
-    int num_lines = 0;
-    int lines_cap = 0;
-    
-    void add_logline() {
-        if (num_lines >= lines_cap) {
-            lines_cap = lines_cap == 0 ? 64 : lines_cap * 2;
-            lines = my_realloc(lines, lines_cap * sizeof(LogLine));
-        }
-        lines[num_lines].cells = NULL;
-        lines[num_lines].len = 0;
-        lines[num_lines].cap = 0;
-        num_lines++;
-    }
-    
-    void append_cell(Cell c) {
-        if (num_lines == 0) add_logline();
-        LogLine *ll = &lines[num_lines - 1];
-        if (ll->len >= ll->cap) {
-            ll->cap = ll->cap == 0 ? 128 : ll->cap * 2;
-            ll->cells = my_realloc(ll->cells, ll->cap * sizeof(Cell));
-        }
-        ll->cells[ll->len++] = c;
-    }
+    // Scrollback ring capacity. Every index into the ring must use this same
+    // modulus — mixing in MAX_SCROLLBACK desynchronizes head/count and reads
+    // stale slots (and leaks cells) whenever max_sb isn't MAX_SCROLLBACK.
+    int max_sb = g_config.scrollback_lines;
+    if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
+    if (max_sb < 0) max_sb = 0;
+
+    LogBuilder lb = {0};
 
     Cell *primary_cells = state->alt_screen_active ? state->alt_cells : state->cells;
     int primary_rows = state->alt_screen_active ? state->alt_rows : state->rows;
@@ -93,10 +118,11 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     int new_primary_cur_x = 0;
     int new_primary_cur_y = 0;
     
-    for (int i = 0; i < state->scrollback_count; i++) {
-        int idx = (state->scrollback_head - state->scrollback_count + i + MAX_SCROLLBACK) % MAX_SCROLLBACK;
+    for (int i = 0; i < state->scrollback_count && max_sb > 0; i++) {
+        int idx = (state->scrollback_head - state->scrollback_count + i + max_sb) % max_sb;
         int sb_cols = state->scrollback[idx].cols;
         Cell *sb_cells = state->scrollback[idx].cells;
+        if (!sb_cells || sb_cols <= 0) continue;
         
         int is_wrapped = sb_cells[sb_cols - 1].wrapped;
         
@@ -105,8 +131,8 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
             while (copy_len > 0 && sb_cells[copy_len - 1].char_code == ' ' && sb_cells[copy_len - 1].bg_color == g_config.bg_color) copy_len--;
         }
         
-        for (int c = 0; c < copy_len; c++) append_cell(sb_cells[c]);
-        if (!is_wrapped) add_logline();
+        for (int c = 0; c < copy_len; c++) log_append_cell(&lb, sb_cells[c]);
+        if (!is_wrapped) log_add_line(&lb);
     }
     
     for (int y = 0; y < primary_rows; y++) {
@@ -119,19 +145,19 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         
         for (int c = 0; c < copy_len; c++) {
             if (y == primary_cur_y && c == primary_cur_x) {
-                new_primary_cur_x = num_lines > 0 ? lines[num_lines - 1].len : 0;
+                new_primary_cur_x = lb.num > 0 ? lb.lines[lb.num - 1].len : 0;
             }
-            append_cell(primary_cells[y * primary_cols + c]);
+            log_append_cell(&lb, primary_cells[y * primary_cols + c]);
         }
         if (y == primary_cur_y && primary_cur_x >= copy_len) {
-            new_primary_cur_x = num_lines > 0 ? lines[num_lines - 1].len : 0;
+            new_primary_cur_x = lb.num > 0 ? lb.lines[lb.num - 1].len : 0;
         }
         
         if (y == primary_cur_y) {
-            new_primary_cur_y = num_lines > 0 ? num_lines - 1 : 0;
+            new_primary_cur_y = lb.num > 0 ? lb.num - 1 : 0;
         }
 
-        if (!is_wrapped) add_logline();
+        if (!is_wrapped) log_add_line(&lb);
     }
     
     typedef struct { Cell *cells; int cols; } PhysLine;
@@ -142,8 +168,8 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     int final_cur_x = 0;
     int final_cur_y = 0;
     
-    for (int i = 0; i < num_lines; i++) {
-        LogLine *ll = &lines[i];
+    for (int i = 0; i < lb.num; i++) {
+        LogLine *ll = &lb.lines[i];
         if (ll->len == 0) {
             if (num_phys >= phys_cap) {
                 phys_cap = phys_cap == 0 ? 64 : phys_cap * 2;
@@ -205,10 +231,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         }
     }
     
-    for(int i=0; i<num_lines; i++) {
-        if(lines[i].cells) my_free(lines[i].cells);
-    }
-    if (lines) { my_free(lines); lines = NULL; }
+    log_builder_free(&lb);
 
     int new_primary_start = num_phys - new_rows;
     if (new_primary_start < 0) new_primary_start = 0;
@@ -219,9 +242,11 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         new_primary_start = final_cur_y - new_rows + 1;
     }
     
-    for (int i = 0; i < state->scrollback_count; i++) {
-        int idx = (state->scrollback_head - state->scrollback_count + i + MAX_SCROLLBACK) % MAX_SCROLLBACK;
-        my_free(state->scrollback[idx].cells);
+    for (int i = 0; i < max_sb; i++) {
+        if (state->scrollback[i].cells) {
+            my_free(state->scrollback[i].cells);
+            state->scrollback[i].cells = NULL;
+        }
     }
     state->scrollback_count = 0;
     state->scrollback_head = 0;
@@ -229,9 +254,6 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     // Preserve tab stops across the resize
     unsigned char *old_tabs = state->tabstops;
     int old_cols_for_tabs = state->cols;
-    
-    int max_sb = g_config.scrollback_lines;
-    if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
     
     for (int i = 0; i < new_primary_start; i++) {
         if (max_sb > 0) {
@@ -243,8 +265,12 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
             state->scrollback[state->scrollback_head].cols = phys_lines[i].cols;
             state->scrollback_head = (state->scrollback_head + 1) % max_sb;
             state->scrollback_count++;
+            // The ring now owns this row; make sure the failure path below
+            // cannot free it a second time
+            phys_lines[i].cells = NULL;
         } else {
             my_free(phys_lines[i].cells);
+            phys_lines[i].cells = NULL;
         }
     }
     
@@ -331,6 +357,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         my_free(old_tabs);
         state->tabstops = new_tabs;
     } else {
+        my_free(old_tabs);
         state->tabstops = NULL;
     }
     
@@ -339,10 +366,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     return;
     
 alloc_fail:
-    for(int i=0; i<num_lines; i++) {
-        if(lines && lines[i].cells) my_free(lines[i].cells);
-    }
-    if (lines) my_free(lines);
+    log_builder_free(&lb);
     for(int i=0; i<num_phys; i++) {
         if(phys_lines && phys_lines[i].cells) my_free(phys_lines[i].cells);
     }
@@ -432,6 +456,13 @@ void vt_init(VTState *state, int rows, int cols, int pty_fd) {
     }
 }
 
+// Blank an entire row in the current background (BCE semantics)
+static void clear_row(VTState *state, int y) {
+    Cell blank = blank_cell(state);
+    Cell *row = &state->cells[y * state->cols];
+    for (int x = 0; x < state->cols; x++) row[x] = blank;
+}
+
 // Scroll up within the scroll region (lines move up, new blank line at bottom of region)
 static void scroll_region_up(VTState *state, int n) {
     int top = state->scroll_top;
@@ -440,21 +471,19 @@ static void scroll_region_up(VTState *state, int n) {
     if (bot >= state->rows) bot = state->rows - 1;
     if (top >= bot) return;
     if (n <= 0) return;
-    if (n > bot - top + 1) n = bot - top + 1;
+    int region = bot - top + 1;
+    if (n > region) n = region;
 
-    // If this is a full-screen scroll (no scroll region set), push to scrollback.
-    // Never while the alternate screen is active: the alt buffer must not
-    // pollute the primary scrollback (vim/less/tmux scrolling).
+    // If this is a full-screen scroll (no scroll region set), push the lines
+    // that fall off the top to scrollback. Never while the alternate screen
+    // is active: the alt buffer must not pollute the primary scrollback.
     if (!state->alt_screen_active && top == 0 && bot == state->rows - 1) {
+        int max_sb = g_config.scrollback_lines;
+        if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
         for (int s = 0; s < n; s++) {
             Cell *old_line = my_malloc(state->cols * sizeof(Cell));
-            if (!old_line) goto skip_scrollback;
-            for (int x = 0; x < state->cols; x++) {
-                old_line[x] = state->cells[0 * state->cols + x];
-            }
-            
-            int max_sb = g_config.scrollback_lines;
-            if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
+            if (!old_line) break; // out of memory — scroll without history
+            memcpy(old_line, &state->cells[s * state->cols], state->cols * sizeof(Cell));
             if (max_sb > 0) {
                 if (state->scrollback_count >= max_sb) {
                     my_free(state->scrollback[state->scrollback_head].cells);
@@ -467,32 +496,19 @@ static void scroll_region_up(VTState *state, int n) {
             } else {
                 my_free(old_line);
             }
-            skip_scrollback:
-            
-            // Shift lines up by 1
-            for (int y = top; y < bot; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    state->cells[y * state->cols + x] = state->cells[(y + 1) * state->cols + x];
-                }
-            }
-            // Clear the bottom line
-            for (int x = 0; x < state->cols; x++) {
-                clear_cell(state, bot, x);
-            }
-        }
-    } else {
-        // Scroll region — no scrollback, just shift lines within region
-        for (int s = 0; s < n; s++) {
-            for (int y = top; y < bot; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    state->cells[y * state->cols + x] = state->cells[(y + 1) * state->cols + x];
-                }
-            }
-            for (int x = 0; x < state->cols; x++) {
-                clear_cell(state, bot, x);
-            }
         }
     }
+
+    // Shift the region up in one bulk move, then blank the vacated lines
+    if (n < region) {
+        memmove(&state->cells[top * state->cols],
+                &state->cells[(top + n) * state->cols],
+                (size_t)(region - n) * state->cols * sizeof(Cell));
+    }
+    for (int y = bot - n + 1; y <= bot; y++) {
+        clear_row(state, y);
+    }
+
     // Adjust image placements so they track with scrolling text
     for (KittyPlacement *p = state->kitty_placements; p; p = p->next) {
         if (top == 0 && bot == state->rows - 1) {
@@ -517,17 +533,17 @@ static void scroll_region_down(VTState *state, int n) {
     if (bot >= state->rows) bot = state->rows - 1;
     if (top >= bot) return;
     if (n <= 0) return;
-    if (n > bot - top + 1) n = bot - top + 1;
+    int region = bot - top + 1;
+    if (n > region) n = region;
 
-    for (int s = 0; s < n; s++) {
-        for (int y = bot; y > top; y--) {
-            for (int x = 0; x < state->cols; x++) {
-                state->cells[y * state->cols + x] = state->cells[(y - 1) * state->cols + x];
-            }
-        }
-        for (int x = 0; x < state->cols; x++) {
-            clear_cell(state, top, x);
-        }
+    // Shift the region down in one bulk move, then blank the vacated lines
+    if (n < region) {
+        memmove(&state->cells[(top + n) * state->cols],
+                &state->cells[top * state->cols],
+                (size_t)(region - n) * state->cols * sizeof(Cell));
+    }
+    for (int y = top; y < top + n; y++) {
+        clear_row(state, y);
     }
     
     // Adjust kitty image placements so they track with scrolling text
@@ -925,24 +941,18 @@ static void handle_csi(VTState *state, char c, int private_mode) {
                 clear_cell(state, state->cursor_y, x);
             }
             for (int y = state->cursor_y + 1; y < state->rows; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    clear_cell(state, y, x);
-                }
+                clear_row(state, y);
             }
         } else if (mode == 1) {
             for (int y = 0; y < state->cursor_y; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    clear_cell(state, y, x);
-                }
+                clear_row(state, y);
             }
             for (int x = 0; x <= state->cursor_x && x < state->cols; x++) {
                 clear_cell(state, state->cursor_y, x);
             }
         } else if (mode == 2) {
             for (int y = 0; y < state->rows; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    clear_cell(state, y, x);
-                }
+                clear_row(state, y);
             }
             while (state->kitty_placements) {
                 KittyPlacement *p = state->kitty_placements;
@@ -1164,10 +1174,10 @@ static void handle_csi(VTState *state, char c, int private_mode) {
         if (mode == 0) { start_x = state->cursor_x; } // cursor to end
         else if (mode == 1) { end_x = state->cursor_x + 1; } // start to cursor
         // mode == 2: entire line (start_x=0, end_x=cols)
+        if (start_x < 0) start_x = 0;
+        if (end_x > state->cols) end_x = state->cols;
         for (int x = start_x; x < end_x; x++) {
-            state->cells[(state->cursor_y) * state->cols + (x)].char_code = ' ';
-            state->cells[(state->cursor_y) * state->cols + (x)].fg_color = state->reverse ? state->current_bg : state->current_fg;
-            state->cells[(state->cursor_y) * state->cols + (x)].bg_color = state->reverse ? state->current_fg : state->current_bg; state->cells[(state->cursor_y) * state->cols + (x)].wrapped = 0;
+            clear_cell(state, state->cursor_y, x);
         }
     } else if (c == 'L') {
         // IL — Insert Lines: insert N blank lines at cursor row, pushing existing lines down
@@ -1176,18 +1186,16 @@ static void handle_csi(VTState *state, char c, int private_mode) {
             int n = (state->num_params > 0 && state->params[0] > 0) ? state->params[0] : 1;
             int top = state->cursor_y;
             int bot = state->scroll_bottom;
-            if (n > bot - top + 1) n = bot - top + 1;
-            // Shift lines down from bottom of region
-            for (int y = bot; y >= top + n; y--) {
-                for (int x = 0; x < state->cols; x++) {
-                    state->cells[y * state->cols + x] = state->cells[(y - n) * state->cols + x];
-                }
+            int region = bot - top + 1;
+            if (n > region) n = region;
+            // Shift lines down in one bulk move, then blank the inserted lines
+            if (n < region) {
+                memmove(&state->cells[(top + n) * state->cols],
+                        &state->cells[top * state->cols],
+                        (size_t)(region - n) * state->cols * sizeof(Cell));
             }
-            // Clear inserted lines
-            for (int y = top; y < top + n && y <= bot; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    clear_cell(state, y, x);
-                }
+            for (int y = top; y < top + n; y++) {
+                clear_row(state, y);
             }
         }
     } else if (c == 'M') {
@@ -1197,18 +1205,16 @@ static void handle_csi(VTState *state, char c, int private_mode) {
             int n = (state->num_params > 0 && state->params[0] > 0) ? state->params[0] : 1;
             int top = state->cursor_y;
             int bot = state->scroll_bottom;
-            if (n > bot - top + 1) n = bot - top + 1;
-            // Shift lines up
-            for (int y = top; y <= bot - n; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    state->cells[y * state->cols + x] = state->cells[(y + n) * state->cols + x];
-                }
+            int region = bot - top + 1;
+            if (n > region) n = region;
+            // Shift lines up in one bulk move, then blank the vacated lines
+            if (n < region) {
+                memmove(&state->cells[top * state->cols],
+                        &state->cells[(top + n) * state->cols],
+                        (size_t)(region - n) * state->cols * sizeof(Cell));
             }
-            // Clear vacated lines at bottom of region
             for (int y = bot - n + 1; y <= bot; y++) {
-                for (int x = 0; x < state->cols; x++) {
-                    clear_cell(state, y, x);
-                }
+                clear_row(state, y);
             }
         }
     } else if (c == 'P') {
@@ -1216,10 +1222,13 @@ static void handle_csi(VTState *state, char c, int private_mode) {
         int n = (state->num_params > 0 && state->params[0] > 0) ? state->params[0] : 1;
         int row = state->cursor_y;
         int col = state->cursor_x;
+        if (col < 0) col = 0;
+        if (col > state->cols) col = state->cols;
         if (n > state->cols - col) n = state->cols - col;
-        // Shift characters left
-        for (int x = col; x < state->cols - n; x++) {
-            state->cells[row * state->cols + x] = state->cells[row * state->cols + x + n];
+        Cell *cells = state->cells + row * state->cols;
+        if (n > 0 && col + n < state->cols) {
+            memmove(&cells[col], &cells[col + n],
+                    (size_t)(state->cols - col - n) * sizeof(Cell));
         }
         // Clear vacated characters at end of line
         for (int x = state->cols - n; x < state->cols; x++) {
@@ -1230,13 +1239,16 @@ static void handle_csi(VTState *state, char c, int private_mode) {
         int n = (state->num_params > 0 && state->params[0] > 0) ? state->params[0] : 1;
         int row = state->cursor_y;
         int col = state->cursor_x;
+        if (col < 0) col = 0;
+        if (col > state->cols) col = state->cols;
         if (n > state->cols - col) n = state->cols - col;
-        // Shift characters right
-        for (int x = state->cols - 1; x >= col + n; x--) {
-            state->cells[row * state->cols + x] = state->cells[row * state->cols + x - n];
+        Cell *cells = state->cells + row * state->cols;
+        if (n > 0 && col + n < state->cols) {
+            memmove(&cells[col + n], &cells[col],
+                    (size_t)(state->cols - col - n) * sizeof(Cell));
         }
         // Clear inserted characters
-        for (int x = col; x < col + n && x < state->cols; x++) {
+        for (int x = col; x < col + n; x++) {
             clear_cell(state, row, x);
         }
     } else if (c == 'X') {
@@ -1244,7 +1256,7 @@ static void handle_csi(VTState *state, char c, int private_mode) {
         int n = (state->num_params > 0 && state->params[0] > 0) ? state->params[0] : 1;
         int row = state->cursor_y;
         for (int x = state->cursor_x; x < state->cursor_x + n && x < state->cols; x++) {
-            clear_cell(state, row, x);
+            if (x >= 0) clear_cell(state, row, x);
         }
     } else if (c == 'b') {
         // REP — Repeat the preceding graphic character N times (ECMA-48)
@@ -1477,9 +1489,13 @@ static void decode_base64(const char *in, int in_len, unsigned char **out, int *
     if (in_len > 0 && in[in_len-1] == '=') pad++;
     if (in_len > 1 && in[in_len-2] == '=') pad++;
     int req_len = (in_len * 3) / 4 - pad;
-    *out = my_malloc(req_len);
+    if (req_len < 0) req_len = 0;
+    // One extra byte for a terminating NUL — callers hand the buffer to
+    // strlen()-based APIs (clipboard, image file paths).
+    *out = my_malloc(req_len + 1);
     *out_len = req_len;
     if (!*out) { *out_len = 0; return; }
+    (*out)[0] = '\0';
     
     int j = 0;
     for (int i = 0; i < in_len; i += 4) {
@@ -1488,10 +1504,20 @@ static void decode_base64(const char *in, int in_len, unsigned char **out, int *
         int v2 = (i+2 < in_len) ? b64_table[(unsigned char)in[i+2]] : -1;
         int v3 = (i+3 < in_len) ? b64_table[(unsigned char)in[i+3]] : -1;
         if (v0 == -1 || v1 == -1) break;
-        (*out)[j++] = (v0 << 2) | ((v1 >> 4) & 3);
-        if (v2 != -1) (*out)[j++] = ((v1 & 15) << 4) | ((v2 >> 2) & 15);
-        if (v3 != -1) (*out)[j++] = ((v2 & 3) << 6) | v3;
+        if (j < req_len) (*out)[j++] = (v0 << 2) | ((v1 >> 4) & 3);
+        if (v2 != -1 && j < req_len) (*out)[j++] = ((v1 & 15) << 4) | ((v2 >> 2) & 15);
+        if (v3 != -1 && j < req_len) (*out)[j++] = ((v2 & 3) << 6) | v3;
     }
+    (*out)[j] = '\0';
+    *out_len = j;
+}
+
+static int parse_clamped_int(const char *s) {
+    // atoi would invoke UB on huge numeric strings; clamp instead
+    long v = strtol(s, NULL, 10);
+    if (v > 1000000) v = 1000000;
+    if (v < -1000000) v = -1000000;
+    return (int)v;
 }
 
 static void parse_kitty_image_command(VTState *state) {
@@ -1509,7 +1535,7 @@ static void parse_kitty_image_command(VTState *state) {
     int payload_len = semi ? len - header_len - 1 : 0;
     
     char header[256];
-    if (header_len >= sizeof(header)) header_len = sizeof(header) - 1;
+    if (header_len >= (int)sizeof(header)) header_len = (int)sizeof(header) - 1;
     memcpy(header, cmd, header_len);
     header[header_len] = '\0';
     
@@ -1521,18 +1547,18 @@ static void parse_kitty_image_command(VTState *state) {
             *eq = '\0';
             char *val = eq + 1;
             if (strcmp(kv, "a") == 0) state->kitty_img.action = val[0];
-            else if (strcmp(kv, "f") == 0) state->kitty_img.format = atoi(val);
-            else if (strcmp(kv, "i") == 0) state->kitty_img.id = atoi(val);
-            else if (strcmp(kv, "p") == 0) state->kitty_img.placement_id = atoi(val);
-            else if (strcmp(kv, "z") == 0) state->kitty_img.z_index = atoi(val);
-            else if (strcmp(kv, "c") == 0) state->kitty_img.cols = atoi(val);
-            else if (strcmp(kv, "r") == 0) state->kitty_img.rows = atoi(val);
-            else if (strcmp(kv, "m") == 0) state->kitty_img.is_more = atoi(val);
+            else if (strcmp(kv, "f") == 0) state->kitty_img.format = parse_clamped_int(val);
+            else if (strcmp(kv, "i") == 0) state->kitty_img.id = parse_clamped_int(val);
+            else if (strcmp(kv, "p") == 0) state->kitty_img.placement_id = parse_clamped_int(val);
+            else if (strcmp(kv, "z") == 0) state->kitty_img.z_index = parse_clamped_int(val);
+            else if (strcmp(kv, "c") == 0) state->kitty_img.cols = parse_clamped_int(val);
+            else if (strcmp(kv, "r") == 0) state->kitty_img.rows = parse_clamped_int(val);
+            else if (strcmp(kv, "m") == 0) state->kitty_img.is_more = parse_clamped_int(val);
             else if (strcmp(kv, "t") == 0) state->kitty_img.t = val[0];
-            else if (strcmp(kv, "q") == 0) state->kitty_img.o = atoi(val);
+            else if (strcmp(kv, "q") == 0) state->kitty_img.o = parse_clamped_int(val);
             else if (strcmp(kv, "o") == 0) state->kitty_img.compression = val[0];
-            else if (strcmp(kv, "s") == 0) state->kitty_img.s = atoi(val);
-            else if (strcmp(kv, "v") == 0) state->kitty_img.v = atoi(val);
+            else if (strcmp(kv, "s") == 0) state->kitty_img.s = parse_clamped_int(val);
+            else if (strcmp(kv, "v") == 0) state->kitty_img.v = parse_clamped_int(val);
         }
         kv = strtok(NULL, ",");
     }
@@ -1731,10 +1757,19 @@ static void parse_kitty_image_command(VTState *state) {
             
             if (decoded) my_free(decoded);
         } else if (state->kitty_img.action == 'd') {
-            // Delete image or placement
-            // Simple clear for now (we could just remove everything to simplify)
-            state->kitty_images = NULL;
-            state->kitty_placements = NULL;
+            // Delete all images and placements (free before unlinking — the
+            // old version leaked every transmission)
+            while (state->kitty_placements) {
+                KittyPlacement *p = state->kitty_placements;
+                state->kitty_placements = p->next;
+                my_free(p);
+            }
+            while (state->kitty_images) {
+                KittyImage *img = state->kitty_images;
+                state->kitty_images = img->next;
+                if (img->pixels) my_free(img->pixels);
+                my_free(img);
+            }
         }
         
         // Reset state since m=0 signifies end of transfer
@@ -1745,7 +1780,12 @@ static void parse_kitty_image_command(VTState *state) {
         state->kitty_img.z_index = 0;
         state->kitty_img.compression = 0;
         state->kitty_img.payload_len = 0;
-        // Do NOT free payload_buf, reuse capacity
+        // Reuse the capacity, but don't pin a huge transfer buffer forever
+        if (state->kitty_img.payload_cap > (16 << 20)) {
+            my_free(state->kitty_img.payload_buf);
+            state->kitty_img.payload_buf = NULL;
+            state->kitty_img.payload_cap = 0;
+        }
     }
 
 }
@@ -1822,11 +1862,12 @@ static void handle_osc(VTState *state) {
     if (state->osc_len <= 0 || !state->osc_buf) return;
     state->osc_buf[state->osc_len] = '\0';
 
-    // Parse the leading number (OSC code)
+    // Parse the leading number (OSC code) — saturate so a malformed OSC
+    // cannot overflow the accumulator
     int code = 0;
     int i = 0;
     while (i < state->osc_len && state->osc_buf[i] >= '0' && state->osc_buf[i] <= '9') {
-        code = code * 10 + (state->osc_buf[i] - '0');
+        if (code < 1000000) code = code * 10 + (state->osc_buf[i] - '0');
         i++;
     }
     char *arg = (i < state->osc_len && state->osc_buf[i] == ';') ? state->osc_buf + i + 1 : NULL;
@@ -1849,7 +1890,7 @@ static void handle_osc(VTState *state) {
             char *tok = strtok_r(arg, ";", &save);
             while (tok) {
                 char *next = strtok_r(NULL, ";", &save);
-                int idx = atoi(tok);
+                int idx = parse_clamped_int(tok);
                 if (next) {
                     if (next[0] == '?' && state->pty_fd != -1) {
                         // Query: reply with the current color
@@ -1910,7 +1951,7 @@ static void handle_osc(VTState *state) {
             } else {
                 char *tok = strtok(arg, ";");
                 while (tok) {
-                    int idx = atoi(tok);
+                    int idx = parse_clamped_int(tok);
                     if (idx >= 0 && idx < 16) config_reset_palette(idx);
                     tok = strtok(NULL, ";");
                 }
@@ -1954,10 +1995,29 @@ static void handle_osc(VTState *state) {
 }
 
 void vt_process(VTState *state, const char *buf, int len) {
+    if (!state || !buf || len <= 0) return;
+    if (!state->cells || state->rows <= 0 || state->cols <= 0) return;
+
     for (int i = 0; i < len; i++) {
         unsigned char c = buf[i];
         
         if (state->state == STATE_NORMAL) {
+            // Fast path: a run of plain printable ASCII (no G0/G1 charset
+            // translation active) bypasses most of the state machine. This is
+            // the overwhelmingly common case (cat, builds, logs...).
+            if (c >= 32 && c < 127 && state->utf8_state == 0) {
+                int charset = state->current_charset ? state->g1_charset : state->g0_charset;
+                if (charset == 0) {
+                    do {
+                        write_cells(state, c, 1);
+                        i++;
+                        if (i >= len) break;
+                        c = (unsigned char)buf[i];
+                    } while (c >= 32 && c < 127);
+                    i--;
+                    continue;
+                }
+            }
             if (c == 0x1B) {
                 state->state = STATE_ESCAPE;
                 state->utf8_state = 0;
@@ -2114,6 +2174,12 @@ void vt_process(VTState *state, const char *buf, int len) {
                 }
                 state->kitty_img.chunk_cap = 0;
                 state->kitty_img.chunk_len = 0;
+                if (state->kitty_img.payload_buf) {
+                    my_free(state->kitty_img.payload_buf);
+                    state->kitty_img.payload_buf = NULL;
+                }
+                state->kitty_img.payload_cap = 0;
+                state->kitty_img.payload_len = 0;
 
                 if (state->osc_buf) {
                     my_free(state->osc_buf);
@@ -2171,7 +2237,10 @@ void vt_process(VTState *state, const char *buf, int len) {
             if (c >= '0' && c <= '9') {
                 if (state->params_overflow) continue;
                 if (state->num_params == 0) state->num_params = 1;
-                state->params[state->num_params - 1] = state->params[state->num_params - 1] * 10 + (c - '0');
+                // Saturate instead of overflowing: sequences like CSI
+                // 99999999999H must not invoke signed overflow UB.
+                int *p = &state->params[state->num_params - 1];
+                if (*p < 1000000) *p = *p * 10 + (c - '0');
             } else if (c == ';') {
                 if (state->num_params < 32) {
                     state->num_params++;
@@ -2230,6 +2299,13 @@ void vt_process(VTState *state, const char *buf, int len) {
                     // else: non-kitty APC (e.g. iTerm2), ignore
                 } else {
                     if (state->kitty_img.chunk_len >= state->kitty_img.chunk_cap) {
+                        if (state->kitty_img.chunk_cap >= (64 << 20)) {
+                            // Runaway APC (no chunking, no terminator) — drop it
+                            // rather than growing without bound
+                            state->kitty_img.chunk_len = 0;
+                            state->kitty_img.kitty_started = 0;
+                            continue;
+                        }
                         state->kitty_img.chunk_cap = state->kitty_img.chunk_cap == 0 ? 1024 : state->kitty_img.chunk_cap * 2;
                         state->kitty_img.chunk_buf = my_realloc(state->kitty_img.chunk_buf, state->kitty_img.chunk_cap);
                     }
