@@ -26,8 +26,8 @@ Before compiling, ensure you have a C compiler (`gcc` or `clang`), `make`, and t
 
 ### Ubuntu / Debian
 ```bash
-# Core build tools, musl libc, and font rendering
-sudo apt install build-essential musl-tools libfontconfig1-dev
+# Core build tools and musl libc (no font libraries needed)
+sudo apt install build-essential musl-tools
 
 # X11 Support (Optional but default)
 sudo apt install libx11-dev libxext-dev
@@ -38,8 +38,8 @@ sudo apt install libwayland-dev libxkbcommon-dev
 
 ### Arch Linux
 ```bash
-# Core build tools, musl libc, and font rendering
-sudo pacman -S base-devel musl fontconfig
+# Core build tools and musl libc
+sudo pacman -S base-devel musl
 
 # X11 Support
 sudo pacman -S libx11 libxext
@@ -47,6 +47,10 @@ sudo pacman -S libx11 libxext
 # Wayland Support
 sudo pacman -S wayland libxkbcommon
 ```
+
+> [!NOTE]
+> Fontconfig, FreeType and libwayland-cursor are **not** dependencies: TermmiK
+> finds fonts and loads Xcursor pointer themes with its own built-in readers.
 
 ## Compilation
 
@@ -66,7 +70,7 @@ make CC="musl-gcc -static"
 ```
 
 > [!WARNING]
-> Building a **fully static** musl binary requires that all of your system graphics libraries (`libX11`, `libwayland-client`, `libfontconfig`) are *also* compiled against musl libc. On standard GNU/Linux distributions (like Ubuntu or Arch), these libraries are dynamically linked against `glibc` by default. To successfully compile a 100% statically linked musl binary without linker errors, it is highly recommended to build TermmiK on a native musl distribution like **Alpine Linux** or **Void Linux (musl)**.
+> Building a **fully static** musl binary requires that the remaining system graphics libraries (`libX11`, `libwayland-client`, `libxkbcommon`) are *also* compiled against musl libc. On standard GNU/Linux distributions (like Ubuntu or Arch), these libraries are dynamically linked against `glibc` by default. To successfully compile a 100% statically linked musl binary without linker errors, it is highly recommended to build TermmiK on a native musl distribution like **Alpine Linux** or **Void Linux (musl)**.
 
 ### Advanced Compilation Flags
 

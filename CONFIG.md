@@ -35,7 +35,7 @@ padding_x=4
 padding_y=4
 padding_left=8                  # per-side overrides win over padding_x/y
 padding_bottom=0
-scrollback_lines=10000
+scrollback_lines=1000
 window_scale=0.9                # initial window size relative to the screen
 
 # Colors (Standard 16 color palette)
@@ -55,12 +55,12 @@ color2=#00AA00
 ## Configuration Options
 
 ### Layout and Font
-- `font_name` (string): The font family to request from FontConfig. Defaults to `monospace`.
-- `font_size` (int): The point size of the font. Defaults to `14`.
+- `font_name` (string): The font family to use. Defaults to `monospace`. Family names are matched by TermmiK's built-in font finder against the fonts installed in the standard directories (`~/.local/share/fonts`, `~/.fonts`, `/usr/share/fonts`, ...); an absolute path to a `.ttf`/`.otf` file also works. Style hints like `JetBrains Mono:style=Bold` are honored; other fontconfig-style keys are ignored.
+- `font_size` (int): The point size of the font. Defaults to `14`. The configured value is what `Ctrl+Shift+0` resets to after runtime zooming (`Ctrl+Shift+=`/`-`, or Ctrl+mouse-wheel).
 - `padding_x` (int): Shorthand that sets **both** `padding_left` and `padding_right`. Defaults to `0`.
 - `padding_y` (int): Shorthand that sets **both** `padding_top` and `padding_bottom`. Defaults to `0`.
 - `padding_left` / `padding_right` / `padding_top` / `padding_bottom` (int): Per-side margins in pixels between the window edge and the text grid. Use these for asymmetric layouts; when set, they override the shorthand values.
-- `scrollback_lines` (int): The number of lines to retain in the scrollback buffer. Defaults to `10000`.
+- `scrollback_lines` (int): The number of lines to retain in the scrollback buffer. Defaults to `1000`, which keeps memory low; each retained line costs roughly 3.2 KB at 200 columns, so `10000` is about 32 MB.
 - `window_scale` (float): Size of the initial window relative to the screen, from `0.1` to `1.0`. Defaults to `0.9`. The size is snapped to whole cells.
 
 ### Config Diagnostics
@@ -80,9 +80,11 @@ A valid config prints nothing.
 The image is composited into the background, so **window transparency keeps working**: with `opacity` below `1.0` you get the image blended over the background color at reduced window alpha, and cells painted with the default background stay see-through.
 
 ### Visuals
+- `gpu` (int/string): Rendering backend. `0`/`off` (default) uses the built-in CPU renderer; `1`/`auto` enables the experimental EGL/GLES2 GPU renderer when the driver provides a context (silently falls back to CPU otherwise). GPU mode keeps text and images on the GPU — uploaded images release their CPU copy — but is still being hardened against compositor interactions, so it is opt-in for now.
+- `frame_rate` (int/string): Maximum frames the terminal presents per second. Defaults to `0` — as fast as output and the compositor allow (on Wayland the compositor already paces to the display refresh). Set e.g. `30`/`60`/`144` to coalesce fast-writing animations: output is still parsed at full speed, but the screen updates at most that often, which saves CPU and battery on low-end machines or on X11 (which has no vsync) when apps like `cava` or `cmatrix` animate faster than you need. Lower values add up to `1000/frame_rate` ms of presentation delay to typing echo and selection dragging, so values below ~24 are not recommended for interactive work; `off`/`unlimited`/`max` are accepted as aliases for `0`.
 - `opacity` (float): The transparency of the terminal background, from `0.0` (fully transparent) to `1.0` (fully opaque). Defaults to `1.0`. Native hardware-accelerated transparency is applied only to the background, keeping text fully opaque.
 - `cursor_shape` (int): The shape of the cursor. `0` block (`█`), `1` underline (`▁`), `2` bar (`|`). Defaults to `0`. (Applications can also change it at runtime via `DECSCUSR`.)
-- `cursor_blink` (int): `0` — no cursor at all. `1` — the cursor blinks while the terminal is idle (fixed 300ms cadence); any input makes it solid. `2` — a steady, non-blinking cursor that is always visible. Defaults to `2`.
+- `cursor_blink` (int): `0` — no cursor at all (overrides every application). `1` — the cursor blinks while the terminal is idle (fixed 300ms cadence); any input makes it solid. `2` — a steady, non-blinking cursor. Modes `1` and `2` both honor the running application's cursor hide request (`?25l`), so full-screen programs like cava, vim or less never get a stray block cursor drawn over their output. Defaults to `2`.
 
 ### Colors
 Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
@@ -102,11 +104,10 @@ Colors are defined using standard 6-digit hex codes. The `#` prefix is optional.
 - `cursor_stop_blinking_after` (float): Seconds of terminal idleness after which the cursor stops blinking and stays solid. Defaults to `15`. `0` keeps it blinking forever.
 
 ### Typing Sounds
-- `key_sound` (string): Path to a short 16-bit PCM WAV file (mono or stereo) played on every keypress. TermmiK ships no sound — grab your own keycap click sample and point at it. Empty (default) disables it.
-- `key_sound_enabled` (int): Master switch — `0` mutes the typing sound entirely without touching the other `key_sound_*` options. Defaults to `1`.
-- `key_sound_volume` (float): Playback volume, from `0.0` to `1.0`. Defaults to `0.5`.
 
-Playback goes through ALSA (`libasound`) directly — no sound servers or extra daemons. If the device or sample is unavailable, the feature silently disables itself and typing is never affected.
+Removed. `key_sound`, `key_sound_enabled` and `key_sound_volume` are no longer
+supported; old config files using them get a line-numbered diagnostic on
+launch and the options are ignored.
 
 ### Font Spacing
 Fine-tune the metrics computed from your font (pixel deltas, can be negative):

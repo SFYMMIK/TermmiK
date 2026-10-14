@@ -24,13 +24,14 @@
 #include <poll.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 #include "pty.h"
 #include "vt_parser.h"
 #include "render.h"
 #include "config.h"
 #include "backend.h"
-#include "sound.h"
+#include "gpu.h"
 
 int g_width = 80 * 9;
 int g_height = 24 * 18;
@@ -41,6 +42,7 @@ uint32_t *g_framebuffer = NULL;
 int g_pty_fd = -1;
 static VTState vt_state;
 static int needs_render = 1;
+static int64_t last_render_ms = 0;
 static int vt_initialized = 0;
 WindowBackend *g_backend = NULL;
 
@@ -71,6 +73,12 @@ void term_bell(void) {
     needs_render = 1;
 }
 
+// Used by the GPU renderer's frame-callback gate: a frame was drawn while the
+// compositor was busy and should be presented when it is ready.
+void term_request_render(void) {
+    needs_render = 1;
+}
+
 void term_resize(int width, int height) {
     if (!vt_initialized) return;
     
@@ -83,6 +91,9 @@ void term_resize(int width, int height) {
         vt_resize(&vt_state, new_rows, new_cols);
         pty_resize(g_pty_fd, new_rows, new_cols);
     }
+#ifdef _HAS_GPU
+    if (g_use_gpu) gpu_resize(width, height);
+#endif
     needs_render = 1;
 }
 
@@ -213,6 +224,96 @@ static void term_send_mouse_event(int button, int is_press, int col, int row) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Selection helpers: logical rows (negative = scrollback), word/line picking
+// ---------------------------------------------------------------------------
+
+static Cell *logical_row_cells(int r) {
+    if (r < 0) {
+        int max_sb = g_config.scrollback_lines;
+        if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
+        if (max_sb <= 0) max_sb = 1;
+        int back = -r;
+        if (back > vt_state.scrollback_count) return NULL;
+        int real_idx = (vt_state.scrollback_head - back + max_sb) % max_sb;
+        return vt_state.scrollback[real_idx].cells;
+    }
+    if (r < vt_state.rows) return &vt_state.cells[r * vt_state.cols];
+    return NULL;
+}
+
+// What double-click treats as one word: alphanumerics plus path/URL/identifier
+// punctuation. Non-ASCII text counts as word content (CJK, emoji, letters).
+static int cell_is_word_char(uint32_t cp) {
+    if (cp >= 0x80) return 1;
+    if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z'))
+        return 1;
+    switch (cp) {
+        case '_': case '-': case '.': case '/': case '~': case ':': case '@':
+        case '+': case '=': case '?': case '&': case '#': case '%': case ',':
+        case '\'': case '"': case '\\': case '|':
+            return 1;
+    }
+    return 0;
+}
+
+static void select_word_at(int col, int row) {
+    int r = row - vt_state.scroll_offset;
+    Cell *cells = logical_row_cells(r);
+    if (!cells) return;
+    if (col < 0) col = 0;
+    if (col >= vt_state.cols) col = vt_state.cols - 1;
+    // Clicking the spacing half of a wide character selects from its lead.
+    if ((cells[col].attrs & CELL_TRAIL) && col > 0) col--;
+
+    int word = cell_is_word_char(cells[col].char_code);
+    int a = col, b = col;
+    while (a > 0) {
+        int p = a - 1;
+        if ((cells[p].attrs & CELL_TRAIL) && p > 0 && cell_is_word_char(cells[p - 1].char_code) == word)
+            p--;
+        if (cell_is_word_char(cells[p].char_code) != word) break;
+        a = p;
+    }
+    while (b + 1 < vt_state.cols) {
+        if (cell_is_word_char(cells[b + 1].char_code) != word) break;
+        b++;
+        if (cells[b].attrs & CELL_WIDE && b + 1 < vt_state.cols) b++; // include both halves
+    }
+
+    g_select_active = 1;
+    g_select_dragging = 0;
+    g_select_start_row = r; g_select_start_col = a;
+    g_select_end_row = r; g_select_end_col = b;
+    needs_render = 1;
+}
+
+static void select_line_at(int row) {
+    int r = row - vt_state.scroll_offset;
+    if (!logical_row_cells(r)) return;
+    int first = r, last = r;
+    while (first > -vt_state.scrollback_count) {
+        Cell *prev = logical_row_cells(first - 1);
+        if (!prev || !prev[vt_state.cols - 1].wrapped) break;
+        first--;
+    }
+    for (;;) {
+        Cell *cur = logical_row_cells(last);
+        if (!cur || !cur[vt_state.cols - 1].wrapped) break;
+        last++;
+    }
+    g_select_active = 1;
+    g_select_dragging = 0;
+    g_select_start_row = first; g_select_start_col = 0;
+    g_select_end_row = last; g_select_end_col = vt_state.cols - 1;
+    needs_render = 1;
+}
+
+// Click tracking for double/triple click (same cell, within 400 ms).
+static int64_t last_click_ms = 0;
+static int click_count = 0;
+static int last_click_col = -1, last_click_row = -1;
+
 void term_mouse_down(int x, int y) {
     int col = (x - g_config.padding_left) / g_cell_width;
     int row = (y - g_config.padding_top) / g_cell_height;
@@ -225,12 +326,110 @@ void term_mouse_down(int x, int y) {
         return;
     }
 
+    int64_t now = bell_now_ms();
+    if (now - last_click_ms <= 400 && col == last_click_col && row == last_click_row) {
+        click_count++;
+    } else {
+        click_count = 1;
+    }
+    last_click_ms = now;
+    last_click_col = col;
+    last_click_row = row;
+
+    if (click_count == 2) {
+        select_word_at(col, row);
+        return;
+    }
+    if (click_count >= 3) {
+        click_count = 0; // a fourth click starts over
+        select_line_at(row);
+        return;
+    }
+
     g_select_active = 0;
     g_select_dragging = 1;
     g_select_start_col = col;
     g_select_start_row = row - vt_state.scroll_offset;
     g_select_end_col = col;
     g_select_end_row = g_select_start_row;
+    needs_render = 1;
+}
+
+// ---------------------------------------------------------------------------
+// OSC 8 hyperlinks: Ctrl+click opens the URI with xdg-open
+// ---------------------------------------------------------------------------
+
+static void open_url(const char *uri) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Detach into its own session so no zombie is left behind.
+        setsid();
+        pid_t child = fork();
+        if (child == 0) {
+            execlp("xdg-open", "xdg-open", uri, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0) waitpid(pid, NULL, 0);
+}
+
+void term_open_link(int x, int y) {
+    if (vt_state.mouse_tracking_mode > 0) return;
+    int col = (x - g_config.padding_left) / g_cell_width;
+    int row = (y - g_config.padding_top) / g_cell_height;
+    if (col < 0 || col >= vt_state.cols || row < 0 || row >= vt_state.rows) return;
+    Cell *cells = logical_row_cells(row - vt_state.scroll_offset);
+    if (!cells) return;
+    int idx = (int)cells[col].link - 1;
+    if (idx < 0 || idx >= vt_state.num_hyperlinks) return;
+    const char *uri = vt_state.hyperlink[idx];
+    if (uri && *uri) open_url(uri);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime font zoom (Ctrl+Shift+=/-/0, Ctrl+wheel)
+// ---------------------------------------------------------------------------
+
+static int base_font_size = 14; // as configured at startup
+
+static void apply_zoom(int new_size) {
+    if (!vt_initialized) return;
+    if (new_size < 4) new_size = 4;
+    if (new_size > 96) new_size = 96;
+    if (new_size == g_config.font_size) return;
+    g_config.font_size = new_size;
+    render_update_font();
+    render_forget_all_buffers(); // metrics changed: everything is repainted
+    term_resize(g_width, g_height); // recompute the grid for the window size
+}
+
+void term_zoom(int delta) {
+    apply_zoom(g_config.font_size + delta);
+}
+
+void term_zoom_reset(void) {
+    apply_zoom(base_font_size);
+}
+
+// Display scale factor (Wayland output scale / Xft.dpi) applied on top of the
+// configured font size. The backend drives this and recreates its buffers
+// afterwards; the logical window size is unchanged (buffer scale).
+static float g_scale = 1.0f;
+
+void term_set_scale(float scale) {
+    if (scale < 0.5f) scale = 0.5f;
+    if (scale > 4.0f) scale = 4.0f;
+    if (scale == g_scale) return;
+    g_scale = scale;
+    render_set_scale(scale);
+    render_forget_all_buffers();
+    if (vt_initialized) {
+        // Same grid, larger pixel buffer: the backend maps it 1:1 to the new
+        // logical surface size via the surface buffer scale.
+        g_width = vt_state.cols * g_cell_width + g_config.padding_left + g_config.padding_right;
+        g_height = vt_state.rows * g_cell_height + g_config.padding_top + g_config.padding_bottom;
+    }
     needs_render = 1;
 }
 
@@ -384,16 +583,19 @@ void term_scroll(int offset) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     config_load();
-    sound_init();
+    base_font_size = g_config.font_size;
 
 #ifdef _HAS_WAYLAND
-    if (getenv("WAYLAND_DISPLAY")) {
+    // An empty (but set) variable is as good as unset.
+    const char *wl_display = getenv("WAYLAND_DISPLAY");
+    if (wl_display && *wl_display) {
         my_print("Starting Wayland backend...\n");
         g_backend = get_wayland_backend();
     }
 #endif
 #ifdef _HAS_X11
-    if (!g_backend && getenv("DISPLAY")) {
+    const char *x_display = getenv("DISPLAY");
+    if (!g_backend && x_display && *x_display) {
         my_print("Starting X11 backend...\n");
         g_backend = get_x11_backend();
     }
@@ -417,6 +619,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+#ifdef _HAS_GPU
+    if (g_config.gpu) {
+        if (gpu_init() == 0) {
+            g_use_gpu = 1;
+        } else {
+            my_print("GPU unavailable — using the CPU renderer\n");
+        }
+    }
+#endif
+
     int initial_cols = (g_width - g_config.padding_left - g_config.padding_right) / g_cell_width;
     if (initial_cols < 1) initial_cols = 1;
     int initial_rows = (g_height - g_config.padding_top - g_config.padding_bottom) / g_cell_height;
@@ -424,6 +636,10 @@ int main(int argc, char **argv) {
 
     vt_init(&vt_state, initial_rows, initial_cols, -1);
     vt_initialized = 1;
+    if (!vt_state.cells || vt_state.rows <= 0) {
+        my_print("Failed to allocate the terminal grid\n");
+        return 1;
+    }
 
     pid_t child_pid;
     if (pty_spawn(&g_pty_fd, &child_pid, initial_rows, initial_cols) != 0) {
@@ -449,6 +665,12 @@ int main(int argc, char **argv) {
     char buf[65536];
     struct timespec last_scroll_time = {0};
     int64_t last_activity_ms = 0;
+    // Earliest time the next frame may be presented (frame_rate pacing).
+    int64_t next_frame_ms = 0;
+    // Set while a frame is held back because the compositor still owns every
+    // presentation buffer — polling must not spin on a frame that cannot be
+    // drawn yet.
+    int frame_waiting_buffer = 0;
 
     while (1) {
         int timeout = -1;
@@ -456,6 +678,22 @@ int main(int argc, char **argv) {
             timeout = 100;
         } else if (g_config.cursor_blink == 1) {
             timeout = CURSOR_BLINK_INTERVAL_MS;
+        }
+        // A frame waiting for a free presentation buffer (Wayland): retry
+        // even if the compositor's release event is late.
+        if (needs_render && timeout < 0) {
+            timeout = 50;
+        }
+        // Frame-rate cap: output is still read and parsed while waiting, it
+        // is just presented at most frame_rate times per second. Wake up
+        // exactly when the next frame becomes due.
+        if (needs_render && g_config.frame_rate > 0 && !frame_waiting_buffer) {
+            int64_t rem = next_frame_ms - bell_now_ms();
+            if (rem <= 0) {
+                timeout = 0;
+            } else if (timeout < 0 || rem < timeout) {
+                timeout = (int)rem;
+            }
         }
         // Wake up when the visual bell flash should end
         if (g_bell_flash_until) {
@@ -529,35 +767,92 @@ int main(int argc, char **argv) {
 
         if (fds[1].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) {
             if (g_backend->poll_events() < 0) break;
+#ifdef _HAS_GPU
+            if (g_use_gpu) gpu_pump();
+#endif
         }
         if (nfds == 3 && (fds[2].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
             if (g_backend->handle_timer) g_backend->handle_timer();
         }
 
         if (fds[0].revents & POLLIN) {
-            ssize_t bytes = pty_read(g_pty_fd, buf, sizeof(buf));
-            if (bytes > 0) {
-                vt_state.scroll_offset = 0;
-                vt_process(&vt_state, buf, bytes);
-                needs_render = 1;
-            } else if (bytes == 0) {
-                break; // Child died
-            } else if (errno != EINTR) {
-                break; // Real read error
+            // Coalesce bursts of output: drain everything already pending
+            // before drawing. The 100 ms liveness cap keeps the screen
+            // updating during endless floods.
+            int budget = 4096;
+            int pty_closed = 0;
+            while (budget > 0) {
+                ssize_t bytes = pty_read(g_pty_fd, buf, sizeof(buf));
+                if (bytes > 0) {
+                    vt_state.scroll_offset = 0;
+                    vt_process(&vt_state, buf, bytes);
+                    needs_render = 1;
+                    budget--;
+                } else if (bytes == 0) {
+                    pty_closed = 1; // Child died
+                    break;
+                } else if (errno == EINTR) {
+                    continue; // retry without spending budget
+                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break; // no more pending input
+                } else {
+                    pty_closed = 1; // Real read error
+                    break;
+                }
+                if (bell_now_ms() - last_render_ms >= 100) break;
+                struct pollfd more = { g_pty_fd, POLLIN, 0 };
+                if (poll(&more, 1, 0) <= 0 || !(more.revents & POLLIN)) break;
             }
-            // EINTR: fall through so a pending frame still gets rendered
+            if (pty_closed) break;
         } else if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
             break;
         }
 
         if (needs_render) {
-            render_draw(&vt_state);
-            g_backend->flush();
-            needs_render = 0;
+            int64_t now_ms = bell_now_ms();
+            // frame_rate pacing: output has already been parsed while waiting,
+            // so the frame simply presents everything received so far.
+            int frame_due = (g_config.frame_rate <= 0) || (now_ms >= next_frame_ms);
+            if (frame_due) {
+#ifdef _HAS_GPU
+                if (g_use_gpu) {
+                    gpu_draw(&vt_state);
+                    gpu_present();
+                    needs_render = 0;
+                    frame_waiting_buffer = 0;
+                } else
+#endif
+                {
+                    // Ask the backend for a drawable buffer first (Wayland arms a
+                    // released SHM buffer here); NULL hook means always ready.
+                    int can_draw = !g_backend->ready_to_draw || g_backend->ready_to_draw();
+                    // Three-way result: drew something / nothing changed / no
+                    // presentation buffer is available yet. Only in the last case
+                    // does the request stay pending (a release event re-arms it).
+                    int drew = can_draw ? render_draw(&vt_state) : -1;
+                    if (drew > 0) {
+                        g_backend->flush();
+                        needs_render = 0;
+                    } else if (drew == 0) {
+                        needs_render = 0;
+                    }
+                    frame_waiting_buffer = (drew < 0);
+                }
+                if (needs_render == 0 && g_config.frame_rate > 0) {
+                    // Schedule from the actual present time; intervals shorter
+                    // than the clock resolution present back-to-back.
+                    next_frame_ms = now_ms + 1000 / g_config.frame_rate;
+                }
+                last_render_ms = now_ms;
+            }
+            // else: keep needs_render set; the poll timeout above wakes us
+            // exactly when the frame becomes due.
         }
     }
 
+#ifdef _HAS_GPU
+    gpu_cleanup();
+#endif
     g_backend->cleanup();
-    sound_cleanup();
     return 0;
 }

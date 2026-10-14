@@ -46,6 +46,19 @@ typedef struct {
     void (*get_clipboard)(void);
     void (*handle_timer)(void);
     void (*set_title)(const char *title);
+
+    // Native handles for the GPU renderer. get_native_platform():
+    // 1 = Wayland, 2 = X11. gl_begin() releases the CPU swapchain once an
+    // EGL context took over presentation.
+    void *(*get_native_display)(void); // wl_display* / Display*
+    void *(*get_native_window)(void);  // wl_surface* / Window
+    int   (*get_native_platform)(void);
+    void  (*gl_begin)(void);
+
+    // Optional: make the CPU render target available for the next frame
+    // (buffered backends arm a released scanout buffer here). Returns 1 when
+    // drawing can proceed, 0 when it must be deferred.
+    int (*ready_to_draw)(void);
 } WindowBackend;
 
 extern WindowBackend *g_backend;
@@ -61,9 +74,9 @@ WindowBackend* get_wayland_backend();
 
 // Callbacks that the backend will invoke
 void term_resize(int width, int height);
+void term_request_render(void); // ask main to draw when a buffer becomes free
 void term_send_input(const char *buf, int len);
 void term_clear_selection(void); // dismiss the current text selection
-void sound_play_key(void);       // play the configured typing sound (no-op if unset)
 void term_scroll(int offset);
 
 // Shared input helpers implemented in main.c
@@ -75,6 +88,10 @@ void term_mouse_down(int x, int y);
 void term_mouse_up(int x, int y);
 void term_mouse_motion(int x, int y);
 void term_copy(void);
+void term_zoom(int delta);                           // runtime font zoom (+in, -out)
+void term_zoom_reset(void);                          // back to the configured font size
+void term_open_link(int x, int y);                   // Ctrl+click on an OSC 8 hyperlink
+void term_set_scale(float scale);                    // display scale (Wayland/Xft.dpi)
 
 // Special key codes (used with term_send_special)
 enum {

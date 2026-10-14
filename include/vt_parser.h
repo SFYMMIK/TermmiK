@@ -19,9 +19,11 @@
 #ifndef VT_PARSER_H
 #define VT_PARSER_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define MAX_SCROLLBACK 10000
+#define MAX_HYPERLINKS 256 // OSC 8 URIs kept per session
 
 // Cell attribute bits (SGR) — rendered by render.c
 #define CELL_BOLD      (1u << 0)
@@ -38,6 +40,7 @@ typedef struct {
     uint32_t bg_color;
     uint8_t wrapped;
     uint8_t attrs;
+    uint16_t link; // OSC 8 hyperlink index+1 (0 = none), fills the padding
 } Cell; // 16 bytes — keep it tight: scrollback holds rows*cols of these
 
 typedef struct KittyImage {
@@ -45,6 +48,9 @@ typedef struct KittyImage {
     int w, h;
     uint32_t *pixels;
     struct KittyImage *next;
+    // GPU texture (uploaded lazily by gpu.c; pixels are released afterwards)
+    unsigned int gl_tex;
+    int gl_ok;
 } KittyImage;
 
 typedef struct KittyPlacement {
@@ -86,6 +92,15 @@ typedef struct {
     Cell *cells;
     int rows;
     int cols;
+
+    // Primary grid ring: `cells` points into a mirrored double mapping, so a
+    // full-screen scroll rotates the base pointer instead of memmoving the
+    // whole screen. NULL when the platform refused the mapping (fallback is
+    // the plain contiguous grid).
+    void *grid_map;
+    size_t grid_map_len;
+    size_t grid_row_bytes;
+    size_t grid_bytes;
 
     struct {
         Cell *cells;
@@ -158,6 +173,12 @@ typedef struct {
     uint32_t current_fg;
     uint32_t current_bg;
     int current_fg_idx;
+
+    // OSC 8 hyperlinks. Cells store index+1; strings are owned here and live
+    // until reset (like kitty, links are not reference counted per cell).
+    char *hyperlink[MAX_HYPERLINKS];
+    int num_hyperlinks;
+    int current_link; // active link index+1 while printing (0 = none)
     
     // Parser state
     int state;

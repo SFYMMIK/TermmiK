@@ -25,7 +25,7 @@ color8=#767676
 cursor_color=#00FF00
 ```
 
-Fonts are rasterized in-process (`stb_truetype`) — no fontconfig rendering stack, no Pango/Cairo. Box drawing, block elements and DEC line art are **synthesized procedurally** to fill the whole cell, so TUI frames connect perfectly with any font.
+Fonts are rasterized in-process (`stb_truetype`) — no fontconfig or FreeType. Family names are matched by a tiny built-in finder that scans the standard font directories, so `monospace`, `DejaVu Sans Mono`, `JetBrains Mono` or a full path all work. Box drawing, block elements and DEC line art are **synthesized procedurally** to fill the whole cell, so TUI frames connect perfectly with any font.
 
 ## 2. The cursor: block, bar, blink
 
@@ -70,18 +70,40 @@ padding_bottom=0
 window_scale=0.9                # initial window size vs. the screen
 ```
 
-## 5. Scroll, bell & typing sounds
+## 5. Scroll & bell
 
 ```ini
-scrollback_lines=10000          # history depth
+scrollback_lines=1000           # history depth (memory grows with this)
 mouse_scroll_step=5             # lines per wheel tick
 visual_bell_duration=0.15       # screen flash when a program rings the bell
-
-# Typing sounds — bring your own keycap click sample (16-bit PCM WAV)
-key_sound=/home/you/sounds/keys.wav   # absolute path, ~ is not expanded
-key_sound_enabled=1             # 0 = mute entirely
-key_sound_volume=0.5
 ```
+
+## 5a. Mouse selection, links & zoom
+
+Click and drag selects text; **double-click** selects the word under the
+pointer, **triple-click** the whole logical line (wrapped lines included).
+Programs that emit **OSC 8 hyperlinks** (`ls --hyperlink`, gcc, cargo, ...)
+get underlined links — **Ctrl+click** opens one with `xdg-open`.
+
+`Ctrl+Shift+=` / `Ctrl+Shift+-` zoom the font live, `Ctrl+Shift+0` resets to
+the configured size, and **Ctrl+mouse-wheel** does the same from the mouse.
+On HiDPI displays the scale factor is picked up automatically (Wayland output
+scale, or `Xft.dpi` on X11), so text stays the same physical size and renders
+at native resolution.
+
+## 5b. Frame rate
+
+```ini
+frame_rate=0                    # 0 = as fast as output/compositor allow
+                                # 30/60/144 caps presentation for fast animations
+                                # (saves CPU/battery; below ~24 adds typing lag)
+```
+
+TermmiK only draws when something changes, so this affects animations like
+`cava` or `cmatrix`, not an idle prompt. On Wayland the compositor already
+paces frames to your display's refresh rate, so raising the cap above it has
+no effect; on X11 the cap keeps fast-writing programs from presenting
+hundreds of frames a second.
 
 ## 6. What runs inside
 

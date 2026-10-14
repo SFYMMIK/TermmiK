@@ -142,7 +142,7 @@ void config_load(void) {
     g_config.cursor_color = 0xFFFFFF;
     g_config.cursor_shape = 0;
     g_config.cursor_blink = 2;
-    g_config.scrollback_lines = 10000;
+    g_config.scrollback_lines = 1000; // kept lean by default; raise in the config if wanted
     g_config.mouse_scroll_step = 3;
     g_config.selection_fg_set = 0;
     g_config.selection_bg_set = 0;
@@ -163,9 +163,11 @@ void config_load(void) {
     g_config.adjust_line_height = 0;
     g_config.adjust_column_width = 0;
     g_config.adjust_baseline = 0;
-    g_config.key_sound[0] = '\0';
-    g_config.key_sound_volume = 0.5f;
-    g_config.key_sound_enabled = 1;
+    g_config.gpu = 0;
+    // 0 = present as fast as output/compositor allow (the default: Wayland
+    // already paces to the display refresh). Set 30/60/144 to trade
+    // smoothness for CPU/battery when apps animate faster than the cap.
+    g_config.frame_rate = 0;
 
     const char *home = getenv("HOME");
     if (!home) { snapshot_defaults(); return; }
@@ -276,6 +278,13 @@ void config_load(void) {
                          "TermmiK: config line %d: cursor_trail was removed "
                          "(no cursor animations); option ignored\n", line_no);
                 my_print(msg);
+            } else if (starts_with(k, "key_sound", key_len)) {
+                // Removed option — warn so old configs don't wonder
+                char msg[128];
+                snprintf(msg, sizeof(msg),
+                         "TermmiK: config line %d: key_sound was removed "
+                         "(typing sounds dropped); option ignored\n", line_no);
+                my_print(msg);
             } else if (starts_with(k, "scrollback_lines", key_len)) {
                 g_config.scrollback_lines = parse_int(v, val_len);
             } else if (starts_with(k, "mouse_scroll_step", key_len)) {
@@ -347,14 +356,23 @@ void config_load(void) {
                 g_config.adjust_column_width = parse_int(v, val_len);
             } else if (starts_with(k, "adjust_baseline", key_len)) {
                 g_config.adjust_baseline = parse_int(v, val_len);
-            } else if (starts_with(k, "key_sound_enabled", key_len)) {
-                g_config.key_sound_enabled = parse_int(v, val_len);
-            } else if (starts_with(k, "key_sound_volume", key_len)) {
-                g_config.key_sound_volume = parse_float(v, val_len);
-                if (g_config.key_sound_volume < 0.0f) g_config.key_sound_volume = 0.0f;
-                if (g_config.key_sound_volume > 1.0f) g_config.key_sound_volume = 1.0f;
-            } else if (starts_with(k, "key_sound", key_len)) {
-                copy_string(g_config.key_sound, v, val_len, 512);
+            } else if (starts_with(k, "gpu", key_len)) {
+                if (val_len >= 4 && strncmp(v, "auto", 4) == 0) g_config.gpu = 1;
+                else if (val_len >= 2 && strncmp(v, "on", 2) == 0) g_config.gpu = 1;
+                else if (val_len >= 3 && strncmp(v, "off", 3) == 0) g_config.gpu = 0;
+                else g_config.gpu = parse_int(v, val_len) != 0;
+            } else if (starts_with(k, "frame_rate", key_len)) {
+                // Frames per second the terminal may present. 0 (or
+                // off/unlimited/max) renders as fast as output arrives.
+                char c0 = val_len > 0 ? v[0] : '\0';
+                if (c0 >= 'A' && c0 <= 'Z') c0 += 'a' - 'A';
+                if (c0 == 'o' || c0 == 'u' || c0 == 'm' || c0 == '-') {
+                    g_config.frame_rate = 0;
+                } else {
+                    g_config.frame_rate = parse_int(v, val_len);
+                    if (g_config.frame_rate < 0) g_config.frame_rate = 0;
+                    if (g_config.frame_rate > 1000) g_config.frame_rate = 1000;
+                }
             } else if (starts_with(k, "foreground", key_len)) {
                 g_config.fg_color = parse_hex(v, val_len);
             } else if (starts_with(k, "background", key_len)) {

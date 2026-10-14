@@ -16,6 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#define _GNU_SOURCE
+
 #include "alloc.h"
 #include "vt_parser.h"
 #include "config.h"
@@ -23,10 +25,106 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include <fcntl.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <emmintrin.h>
+#include <smmintrin.h>
+#include <immintrin.h>
+
+// ---------------------------------------------------------------------------
+// Mirrored grid mapping
+//
+// The primary screen lives in a ring of rows: two overlaid mappings of the
+// same shared memory. `cells` may be advanced within [base, base+grid) and
+// the window stays contiguous, so a full-screen scroll becomes a pointer
+// rotation instead of a rows*cols memmove per line.
+// ---------------------------------------------------------------------------
+static size_t gcd_size(size_t a, size_t b) {
+    while (b) { size_t t = a % b; a = b; b = t; }
+    return a;
+}
+
+static Cell *grid_alloc(void **out_map, size_t *out_map_len, size_t *out_row_bytes,
+                        size_t *out_grid_bytes, int rows, int cols) {
+    size_t row_bytes = (size_t)cols * sizeof(Cell);
+    size_t total = row_bytes * (size_t)rows;
+    if (total == 0) return NULL;
+
+    // The mirrored mapping needs the alias address to be page-aligned AND the
+    // ring length to be a whole number of rows (the row base rotates by
+    // row_bytes), so round the total up to a multiple of lcm(page, row_bytes).
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    if (page == 0) page = 4096;
+    size_t unit = page / gcd_size(page, row_bytes) * row_bytes;
+    size_t grid = ((total + unit - 1) / unit) * unit;
+
+    void *reserve = mmap(NULL, grid * 2, PROT_NONE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reserve == MAP_FAILED) return NULL;
+
+    int fd = memfd_create("termmik-grid", MFD_CLOEXEC);
+    if (fd < 0) { munmap(reserve, grid * 2); return NULL; }
+    if (ftruncate(fd, (off_t)grid) != 0) {
+        close(fd);
+        munmap(reserve, grid * 2);
+        return NULL;
+    }
+
+    void *base = mmap(reserve, grid, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+    if (base == MAP_FAILED) {
+        close(fd);
+        munmap(reserve, grid * 2);
+        return NULL;
+    }
+    void *alias = mmap((char *)reserve + grid, grid, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_FIXED, fd, 0);
+    close(fd);
+    if (alias == MAP_FAILED) {
+        munmap(reserve, grid * 2);
+        return NULL;
+    }
+
+    *out_map = reserve;
+    *out_map_len = grid * 2;
+    *out_row_bytes = row_bytes;
+    *out_grid_bytes = grid;
+    return (Cell *)reserve;
+}
+
+static void grid_free(void *map, size_t map_len, Cell *fallback) {
+    if (map) {
+        munmap(map, map_len);
+    } else if (fallback) {
+        my_free(fallback);
+    }
+}
+
+// Scrollback entries normally point straight into the grid ring: the row that
+// scrolls off the top just stays put and the base rotates past it (no copy,
+// no allocation). Right after a resize the history is re-wrapped into private
+// buffers instead — those are the only entries that must be freed.
+static int cell_in_ring(VTState *state, const Cell *p) {
+    if (!p || !state->grid_map) return 0;
+    const char *c = (const char *)p;
+    return c >= (const char *)state->grid_map &&
+           c < (const char *)state->grid_map + state->grid_bytes;
+}
+
+static void scrollback_release_entry(VTState *state, Cell *p) {
+    if (p && !cell_in_ring(state, p)) my_free(p);
+}
+
+static int scrollback_capacity(void) {
+    int max_sb = g_config.scrollback_lines;
+    if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
+    if (max_sb < 0) max_sb = 0;
+    return max_sb;
+}
 
 // Debug logging to /tmp/kitty_cmd.log, enabled only with TERMMIK_DEBUG=1
 static void kitty_log(const char *fmt, ...) {
@@ -99,6 +197,7 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     empty_cell.bg_color = state->reverse ? state->current_fg : state->current_bg;
     empty_cell.wrapped = 0;
     empty_cell.attrs = 0;
+    empty_cell.link = 0;
 
     // Scrollback ring capacity. Every index into the ring must use this same
     // modulus — mixing in MAX_SCROLLBACK desynchronizes head/count and reads
@@ -243,10 +342,8 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     }
     
     for (int i = 0; i < max_sb; i++) {
-        if (state->scrollback[i].cells) {
-            my_free(state->scrollback[i].cells);
-            state->scrollback[i].cells = NULL;
-        }
+        scrollback_release_entry(state, state->scrollback[i].cells);
+        state->scrollback[i].cells = NULL;
     }
     state->scrollback_count = 0;
     state->scrollback_head = 0;
@@ -274,7 +371,16 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         }
     }
     
-    Cell *new_primary = my_malloc(new_rows * new_cols * sizeof(Cell));
+    // The grid pointed to by state->cells is always ring-mapped; the parked
+    // alt/primary copy in alt_cells is a plain allocation.
+    void *np_map = NULL; size_t np_ml = 0, np_rb = 0, np_gb = 0;
+    void *na_map = NULL; size_t na_ml = 0, na_rb = 0, na_gb = 0;
+    Cell *new_primary;
+    if (state->alt_screen_active) {
+        new_primary = my_malloc(new_rows * new_cols * sizeof(Cell));
+    } else {
+        new_primary = grid_alloc(&np_map, &np_ml, &np_rb, &np_gb, new_rows + max_sb, new_cols);
+    }
     if (!new_primary) goto alloc_fail;
     for (int y = 0; y < new_rows; y++) {
         int py = new_primary_start + y;
@@ -300,9 +406,14 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         int old_alt_rows = state->alt_screen_active ? state->rows : state->alt_rows;
         int old_alt_cols = state->alt_screen_active ? state->cols : state->alt_cols;
         
-        new_alt = my_malloc(new_rows * new_cols * sizeof(Cell));
+        if (state->alt_screen_active) {
+            new_alt = grid_alloc(&na_map, &na_ml, &na_rb, &na_gb, new_rows + max_sb, new_cols);
+        } else {
+            new_alt = my_malloc(new_rows * new_cols * sizeof(Cell));
+        }
         if (!new_alt) {
-            my_free(new_primary);
+            if (np_map) grid_free(np_map, np_ml, new_primary);
+            else my_free(new_primary);
             goto alloc_fail;
         }
         for (int y = 0; y < new_rows; y++) {
@@ -317,10 +428,14 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
     }
     
     if (state->alt_screen_active) {
-        my_free(state->cells);
+        grid_free(state->grid_map, state->grid_map_len, state->cells);
         if (state->alt_cells) my_free(state->alt_cells);
         
         state->cells = new_alt;
+        state->grid_map = na_map;
+        state->grid_map_len = na_ml;
+        state->grid_row_bytes = na_rb;
+        state->grid_bytes = na_gb;
         state->alt_cells = new_primary;
         
         state->save_x = final_cur_x;
@@ -329,10 +444,14 @@ void vt_resize(VTState *state, int new_rows, int new_cols) {
         if (state->cursor_x >= new_cols) state->cursor_x = new_cols - 1;
         if (state->cursor_y >= new_rows) state->cursor_y = new_rows - 1;
     } else {
-        my_free(state->cells);
+        grid_free(state->grid_map, state->grid_map_len, state->cells);
         if (state->alt_cells) my_free(state->alt_cells);
         
         state->cells = new_primary;
+        state->grid_map = np_map;
+        state->grid_map_len = np_ml;
+        state->grid_row_bytes = np_rb;
+        state->grid_bytes = np_gb;
         state->alt_cells = new_alt;
         
         state->cursor_x = final_cur_x;
@@ -384,7 +503,7 @@ enum {
 };
 
 // A blank cell in the current background (with BCE semantics — reverse is
-// baked into the colors, attributes are always cleared).
+// baked into the colors, attributes and hyperlinks are always cleared).
 static Cell blank_cell(VTState *state) {
     Cell c;
     c.char_code = ' ';
@@ -392,6 +511,7 @@ static Cell blank_cell(VTState *state) {
     c.bg_color = state->reverse ? state->current_fg : state->current_bg;
     c.wrapped = 0;
     c.attrs = 0;
+    c.link = 0;
     return c;
 }
 
@@ -419,7 +539,11 @@ void vt_init(VTState *state, int rows, int cols, int pty_fd) {
     state->rows = rows;
     state->cols = cols;
     state->pty_fd = pty_fd;
-    state->cells = my_malloc(rows * cols * sizeof(Cell));
+    // The ring holds the visible screen plus the scrollback history: rows that
+    // scroll off the top keep their slots, so history costs no copies.
+    state->cells = grid_alloc(&state->grid_map, &state->grid_map_len,
+                              &state->grid_row_bytes, &state->grid_bytes,
+                              rows + scrollback_capacity(), cols);
     if (!state->cells) {
         state->rows = 0;
         state->cols = 0;
@@ -452,15 +576,37 @@ void vt_init(VTState *state, int rows, int cols, int pty_fd) {
             state->cells[(y) * state->cols + (x)].fg_color = state->reverse ? state->current_bg : state->current_fg;
             state->cells[(y) * state->cols + (x)].bg_color = state->reverse ? state->current_fg : state->current_bg; state->cells[(y) * state->cols + (x)].wrapped = 0;
             state->cells[(y) * state->cols + (x)].attrs = 0;
+            state->cells[(y) * state->cols + (x)].link = 0;
         }
     }
 }
 
-// Blank an entire row in the current background (BCE semantics)
+// Blank an entire row in the current background (BCE semantics). The row is
+// about to be written by the parser and read by the renderer, so cached wide
+// stores are the right choice here (the ring frontier is sequential).
 static void clear_row(VTState *state, int y) {
     Cell blank = blank_cell(state);
     Cell *row = &state->cells[y * state->cols];
-    for (int x = 0; x < state->cols; x++) row[x] = blank;
+    int n = state->cols;
+    if (n >= 4) {
+        __m128i p16 = _mm_set_epi32((uint32_t)blank.attrs << 8 | blank.wrapped,
+                                    blank.bg_color, blank.fg_color, blank.char_code);
+        __m256i pat = _mm256_set_m128i(p16, p16);
+        int i = 0;
+        for (; i + 1 < n; i += 2) {
+            _mm256_storeu_si256((__m256i *)(row + i), pat);
+        }
+        if (i < n) _mm_storeu_si128((__m128i *)(row + i), p16);
+    } else {
+        for (int x = 0; x < n; x++) row[x] = blank;
+    }
+}
+
+// Move a row out to the scrollback ring. The destination cycles through many
+// different line buffers, so non-temporal stores cannot combine here — they
+// serialize at memory latency. A plain cached copy is much faster.
+static void copy_row_to_scrollback(Cell *dst, const Cell *src, int n) {
+    memcpy(dst, src, (size_t)n * sizeof(Cell));
 }
 
 // Scroll up within the scroll region (lines move up, new blank line at bottom of region)
@@ -478,35 +624,51 @@ static void scroll_region_up(VTState *state, int n) {
     // that fall off the top to scrollback. Never while the alternate screen
     // is active: the alt buffer must not pollute the primary scrollback.
     if (!state->alt_screen_active && top == 0 && bot == state->rows - 1) {
-        int max_sb = g_config.scrollback_lines;
-        if (max_sb > MAX_SCROLLBACK) max_sb = MAX_SCROLLBACK;
-        for (int s = 0; s < n; s++) {
-            Cell *old_line = my_malloc(state->cols * sizeof(Cell));
-            if (!old_line) break; // out of memory — scroll without history
-            memcpy(old_line, &state->cells[s * state->cols], state->cols * sizeof(Cell));
-            if (max_sb > 0) {
-                if (state->scrollback_count >= max_sb) {
-                    my_free(state->scrollback[state->scrollback_head].cells);
-                } else {
-                    state->scrollback_count++;
-                }
-                state->scrollback[state->scrollback_head].cells = old_line;
-                state->scrollback[state->scrollback_head].cols = state->cols;
-                state->scrollback_head = (state->scrollback_head + 1) % max_sb;
+        int max_sb = scrollback_capacity();
+        for (int s = 0; s < n && max_sb > 0; s++) {
+            if (state->grid_map) {
+                // History lives in the grid ring itself: the row that scrolls
+                // off the top keeps its slot and the base rotates past it. No
+                // copy and no allocation — the slot is only cleared much later,
+                // when the ring wraps around and it becomes the bottom line.
+                scrollback_release_entry(state, state->scrollback[state->scrollback_head].cells);
+                state->scrollback[state->scrollback_head].cells = &state->cells[s * state->cols];
             } else {
-                my_free(old_line);
+                // Ring mapping unavailable — fall back to private buffers.
+                Cell *old_line = my_malloc(state->cols * sizeof(Cell));
+                if (!old_line) break; // out of memory — scroll without history
+                copy_row_to_scrollback(old_line, &state->cells[s * state->cols], state->cols);
+                scrollback_release_entry(state, state->scrollback[state->scrollback_head].cells);
+                state->scrollback[state->scrollback_head].cells = old_line;
             }
+            state->scrollback[state->scrollback_head].cols = state->cols;
+            state->scrollback_head = (state->scrollback_head + 1) % max_sb;
+            if (state->scrollback_count < max_sb) state->scrollback_count++;
         }
     }
 
-    // Shift the region up in one bulk move, then blank the vacated lines
-    if (n < region) {
-        memmove(&state->cells[top * state->cols],
-                &state->cells[(top + n) * state->cols],
-                (size_t)(region - n) * state->cols * sizeof(Cell));
-    }
-    for (int y = bot - n + 1; y <= bot; y++) {
-        clear_row(state, y);
+    // Ring grid: a full-screen primary scroll rotates the row base instead of
+    // memmoving every row. The mirrored mapping keeps the window contiguous
+    // and the vacated bottom rows alias the old top rows (already copied to
+    // scrollback above), so only clearing is left.
+    if (!state->alt_screen_active && top == 0 && bot == state->rows - 1 &&
+        state->grid_map != NULL) {
+        state->cells = (Cell *)((char *)state->cells + (size_t)n * state->grid_row_bytes);
+        if ((char *)state->cells >= (char *)state->grid_map + state->grid_bytes)
+            state->cells = (Cell *)((char *)state->cells - state->grid_bytes);
+        for (int y = bot - n + 1; y <= bot; y++) {
+            clear_row(state, y);
+        }
+    } else {
+        // Shift the region up in one bulk move, then blank the vacated lines
+        if (n < region) {
+            memmove(&state->cells[top * state->cols],
+                    &state->cells[(top + n) * state->cols],
+                    (size_t)(region - n) * state->cols * sizeof(Cell));
+        }
+        for (int y = bot - n + 1; y <= bot; y++) {
+            clear_row(state, y);
+        }
     }
 
     // Adjust image placements so they track with scrolling text
@@ -656,6 +818,7 @@ static void write_cells(VTState *state, uint32_t c, int width) {
     lead->bg_color = state->reverse ? state->current_fg : state->current_bg;
     lead->wrapped = 0;
     lead->attrs = current_attrs(state) | (width == 2 ? CELL_WIDE : 0);
+    lead->link = (uint16_t)state->current_link;
     if (width == 2 && state->cursor_x + 1 < state->cols) {
         Cell *trail = lead + 1;
         trail->char_code = 0;
@@ -663,10 +826,56 @@ static void write_cells(VTState *state, uint32_t c, int width) {
         trail->bg_color = lead->bg_color;
         trail->wrapped = 0;
         trail->attrs = CELL_TRAIL;
+        trail->link = lead->link;
     }
     state->last_cell = *lead;
     state->have_last_cell = 1;
     state->cursor_x += width;
+}
+
+// Fast path for runs of printable ASCII (single-width, no charset
+// translation): hoist colors/attrs and write the cells in a tight loop.
+static void write_ascii_run(VTState *state, const unsigned char *buf, int len) {
+    int cols = state->cols;
+    int rows = state->rows;
+    int wrap = state->auto_wrap;
+    int bottom = state->scroll_bottom;
+    uint32_t fg = state->reverse ? state->current_bg : state->current_fg;
+    uint32_t bg = state->reverse ? state->current_fg : state->current_bg;
+    uint8_t attrs = current_attrs(state);
+    int x = state->cursor_x;
+    int y = state->cursor_y;
+    // Lane 3 holds wrapped | attrs<<8 | link<<16 (the cell's trailing bytes).
+    __m128i tmpl = _mm_set_epi32(((uint32_t)state->current_link << 16) | ((uint32_t)attrs << 8),
+                                 bg, fg, ' ');
+
+    for (int k = 0; k < len; k++) {
+        if (x >= cols) {
+            if (wrap) {
+                state->cells[y * cols + (cols - 1)].wrapped = 1;
+                x = 0;
+                if (y == bottom) {
+                    scroll_up(state);
+                } else if (y < rows - 1) {
+                    y++;
+                }
+            } else {
+                x = cols - 1;
+            }
+        }
+        Cell *cell = &state->cells[y * cols + x];
+        _mm_storeu_si128((__m128i *)cell, _mm_insert_epi32(tmpl, (int)buf[k], 0));
+        x++;
+    }
+
+    state->cursor_x = x;
+    state->cursor_y = y;
+    if (x > 0) {
+        state->last_cell = state->cells[y * cols + (x - 1)];
+    } else {
+        state->last_cell = state->cells[y * cols];
+    }
+    state->have_last_cell = 1;
 }
 
 static void put_char(VTState *state, uint32_t c) {
@@ -1524,6 +1733,12 @@ static void parse_kitty_image_command(VTState *state) {
     if (state->kitty_img.chunk_len == 0) return;
     char *cmd = state->kitty_img.chunk_buf;
     int len = state->kitty_img.chunk_len;
+
+    // Per the kitty protocol, m defaults to 0 and kitten icat omits it on the
+    // final chunk of a chunked transfer. Default it for every command so the
+    // last chunk is actually processed (previously a stale m=1 from the
+    // previous chunk silently swallowed multi-chunk images).
+    state->kitty_img.is_more = 0;
     
     // Log every received kitty command for debugging
     kitty_log("KITTY CMD [%d bytes]: %.*s\n", len, len > 200 ? 200 : len, cmd);
@@ -1857,6 +2072,21 @@ static int parse_x_color(const char *s, uint32_t *out) {
     return 1;
 }
 
+// Register an OSC 8 URI (deduplicated); returns index+1, or 0 for none/full.
+static int hyperlink_register(VTState *state, const char *uri) {
+    size_t len = strlen(uri);
+    if (len == 0 || len > 4096) return 0;
+    for (int i = 0; i < state->num_hyperlinks; i++) {
+        if (strcmp(state->hyperlink[i], uri) == 0) return i + 1;
+    }
+    if (state->num_hyperlinks >= MAX_HYPERLINKS) return 0;
+    char *copy = my_malloc(len + 1);
+    if (!copy) return 0;
+    memcpy(copy, uri, len + 1);
+    state->hyperlink[state->num_hyperlinks] = copy;
+    return ++state->num_hyperlinks; // index+1 of the new entry
+}
+
 // Handle a completed OSC string (terminated by BEL or ST)
 static void handle_osc(VTState *state) {
     if (state->osc_len <= 0 || !state->osc_buf) return;
@@ -1910,6 +2140,14 @@ static void handle_osc(VTState *state) {
                 }
                 tok = next;
             }
+            break;
+        }
+        case 8: {
+            // OSC 8 — hyperlinks: 8;params;URI (an empty URI closes the link)
+            if (!arg) { state->current_link = 0; break; }
+            char *semi = strchr(arg, ';');
+            if (!semi || semi[1] == '\0') { state->current_link = 0; break; }
+            state->current_link = hyperlink_register(state, semi + 1);
             break;
         }
         case 10:
@@ -2008,12 +2246,13 @@ void vt_process(VTState *state, const char *buf, int len) {
             if (c >= 32 && c < 127 && state->utf8_state == 0) {
                 int charset = state->current_charset ? state->g1_charset : state->g0_charset;
                 if (charset == 0) {
+                    int start = i;
                     do {
-                        write_cells(state, c, 1);
                         i++;
                         if (i >= len) break;
                         c = (unsigned char)buf[i];
                     } while (c >= 32 && c < 127);
+                    write_ascii_run(state, (const unsigned char *)buf + start, i - start);
                     i--;
                     continue;
                 }
@@ -2147,13 +2386,18 @@ void vt_process(VTState *state, const char *buf, int len) {
                 if (state->alt_cells) {
                     my_free(state->alt_cells);
                 }
-                // Free current cells before vt_init allocates new ones
-                my_free(state->cells);
-
-                // Free scrollback and tab stops
+                // Release private (re-wrapped) scrollback buffers first; the
+                // entries that point into the grid ring die with the ring.
                 for (int i = 0; i < MAX_SCROLLBACK; i++) {
-                    if (state->scrollback[i].cells) my_free(state->scrollback[i].cells);
+                    scrollback_release_entry(state, state->scrollback[i].cells);
                 }
+
+                // Free current cells before vt_init allocates new ones
+                grid_free(state->grid_map, state->grid_map_len, state->cells);
+                state->grid_map = NULL;
+                state->grid_map_len = 0;
+                state->grid_bytes = 0;
+
                 if (state->tabstops) my_free(state->tabstops);
 
                 // Free kitty protocol images and placements
@@ -2187,6 +2431,13 @@ void vt_process(VTState *state, const char *buf, int len) {
                 }
                 state->osc_cap = 0;
                 state->osc_len = 0;
+
+                for (int i = 0; i < state->num_hyperlinks; i++) {
+                    if (state->hyperlink[i]) my_free(state->hyperlink[i]);
+                    state->hyperlink[i] = NULL;
+                }
+                state->num_hyperlinks = 0;
+                state->current_link = 0;
 
                 vt_init(state, rows, cols, pty_fd);
                 state->state = STATE_NORMAL;

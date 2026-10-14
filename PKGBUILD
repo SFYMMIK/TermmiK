@@ -9,7 +9,7 @@ url="https://git.sfymmik.xyz/SfymmiK/TermmiK"
 license=('GPL3')
 
 # Everything needed to compile all possible backends
-makedepends=('git' 'make' 'gcc' 'fontconfig' 'libx11' 'libxext' 'wayland' 'libxkbcommon' 'alsa-lib')
+makedepends=('git' 'make' 'gcc' 'libx11' 'libxext' 'wayland' 'libxkbcommon' 'libglvnd')
 
 # Build tuned for the CPU of the machine running makepkg (-march=native),
 # which is what AUR user builds want. Set to 0 to build a portable binary
@@ -48,7 +48,7 @@ build() {
 
 package_termmik-git() {
   pkgdesc="A custom lightweight C-based terminal emulator (X11 and Wayland)"
-  depends=('glibc' 'fontconfig' 'libx11' 'libxext' 'wayland' 'libxkbcommon' 'alsa-lib')
+  depends=('glibc' 'libx11' 'libxext' 'wayland' 'libxkbcommon' 'libglvnd')
   provides=('termmik')
   conflicts=('termmik' 'termmik-x11-git' 'termmik-wayland-git')
 
@@ -58,7 +58,7 @@ package_termmik-git() {
 
 package_termmik-x11-git() {
   pkgdesc="A custom lightweight C-based terminal emulator (X11 only)"
-  depends=('glibc' 'fontconfig' 'libx11' 'libxext' 'alsa-lib')
+  depends=('glibc' 'libx11' 'libxext' 'libglvnd')
   provides=('termmik')
   conflicts=('termmik' 'termmik-git' 'termmik-wayland-git')
 
@@ -68,7 +68,7 @@ package_termmik-x11-git() {
 
 package_termmik-wayland-git() {
   pkgdesc="A custom lightweight C-based terminal emulator (Wayland only)"
-  depends=('glibc' 'fontconfig' 'wayland' 'libxkbcommon' 'alsa-lib')
+  depends=('glibc' 'wayland' 'libxkbcommon' 'libglvnd')
   provides=('termmik')
   conflicts=('termmik' 'termmik-git' 'termmik-x11-git')
 

@@ -20,7 +20,7 @@
 #include "backend.h"
 #include "config.h"
 #include <wayland-client.h>
-#include <wayland-cursor.h>
+#include "xcursor.h"
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-client-protocol.h"
 #include "render.h"
@@ -47,12 +47,25 @@ static struct wl_pointer *wl_pointer = NULL;
 static struct wl_surface *wl_surface = NULL;
 static struct xdg_surface *xdg_surface = NULL;
 static struct xdg_toplevel *xdg_toplevel = NULL;
+static int wl_gl_active = 0;
 
 // Pointer cursor (Wayland clients own their cursor images — without this the
-// compositor shows no cursor while the pointer is over the window)
-static struct wl_cursor_theme *cursor_theme = NULL;
-static struct wl_cursor *cursor_left_ptr = NULL;
+// compositor shows no cursor while the pointer is over the window). The image
+// is loaded from the user's Xcursor theme by the built-in reader; there is no
+// libwayland-cursor dependency.
 static struct wl_surface *cursor_surface = NULL;
+static struct wl_buffer *cursor_buffer = NULL;
+static int cursor_fd = -1;
+static void *cursor_map = NULL;
+static size_t cursor_map_size = 0;
+static int cursor_w = 0, cursor_h = 0, cursor_hot_x = 0, cursor_hot_y = 0;
+static int cursor_scale = 1; // buffer scale of the cursor surface (HiDPI)
+
+// Output geometry/scale (HiDPI). Pointer coordinates arrive in logical
+// surface units and are multiplied by the scale to reach framebuffer pixels.
+static int screen_w = 0, screen_h = 0;
+static int output_scale_factor = 1;
+static int wayland_ready = 0; // init finished; scale events may reconfigure live
 
 // ---------------------------------------------------------------------------
 // Cursor theme resolution. XCURSOR_THEME/XCURSOR_SIZE take priority; if the
@@ -105,13 +118,15 @@ static const char *resolve_cursor_theme(char *name_out, int name_len, int *size_
     const char *env_theme = getenv("XCURSOR_THEME");
     if (env_theme && *env_theme) {
         if (*size_out <= 0) *size_out = 24;
-        return NULL; // libwayland-cursor reads XCURSOR_THEME itself
+        snprintf(name_out, (size_t)name_len, "%s", env_theme);
+        return name_out;
     }
 
     const char *home = getenv("HOME");
     if (!home) {
         *size_out = (*size_out > 0) ? *size_out : 24;
-        return NULL;
+        snprintf(name_out, (size_t)name_len, "default");
+        return name_out;
     }
 
     char path[512];
@@ -145,33 +160,85 @@ static const char *resolve_cursor_theme(char *name_out, int name_len, int *size_
     }
 
     *size_out = (*size_out > 0) ? *size_out : 24;
-    return NULL;
+    snprintf(name_out, (size_t)name_len, "default");
+    return name_out;
 }
 
 static int shm_fd = -1;
 static uint32_t *shm_data = NULL;
 static int pool_size = 0;
 
-// Two buffers, alternated on every commit. Rendering into the buffer the
-// compositor is still scanning out causes tearing; the release event tells
-// us a buffer is free again. With both busy we stay on the current buffer
-// (progress over perfection for a terminal).
+// Two buffers, alternated on every commit. Rendering into a buffer the
+// compositor is still scanning out tears the frame and can show a partially
+// painted screen (the "black flash" during animations), so a buffer is only
+// ever drawn into after its release event arrived. When both buffers are
+// busy the frame is deferred — the current screen contents simply stay up —
+// and the pending release re-arms rendering. That trades a dropped frame for
+// a seamless image, which is the right deal for a terminal.
 #define WAYLAND_NUM_BUFFERS 2
+// If the compositor never releases either buffer for this long, something is
+// wrong on its side — take the least recently committed buffer back by force
+// so output cannot stall forever (a rare tear beats a frozen terminal).
+#define WAYLAND_STARVE_LIMIT_MS 250
 
 typedef struct {
     struct wl_buffer *buffer;
     uint32_t *data;
     int busy;
+    uint64_t commit_seq;
 } ShmBuffer;
 
 static ShmBuffer shm_buffers[WAYLAND_NUM_BUFFERS];
-static int current_buffer = 0;
+static int draw_buffer = -1; // buffer g_framebuffer points into, -1 = none free
+static uint64_t commit_seq = 0;
+static int64_t starve_start_ms = 0;
 
 static uint32_t compositor_version = 0;
+
+// Index of a buffer safe to render into, or -1 when the compositor still
+// owns both. Caller must be on the UI thread (buffers change in callbacks).
+static int pick_free_buffer(void) {
+    for (int i = 0; i < WAYLAND_NUM_BUFFERS; i++) {
+        ShmBuffer *b = &shm_buffers[i];
+        if (b->buffer && !b->busy && i != draw_buffer) return i;
+    }
+    return -1;
+}
+
+// Hand the renderer a buffer to draw into. Returns 1 when g_framebuffer is
+// usable, 0 while every buffer is still held by the compositor.
+static int arm_draw_buffer(void) {
+    if (g_framebuffer) return 1;
+    int idx = pick_free_buffer();
+    if (idx < 0 && starve_start_ms &&
+        bell_now_ms() - starve_start_ms >= WAYLAND_STARVE_LIMIT_MS) {
+        // Force-reuse the least recently committed buffer.
+        int oldest = -1;
+        uint64_t best = UINT64_MAX;
+        for (int i = 0; i < WAYLAND_NUM_BUFFERS; i++) {
+            ShmBuffer *b = &shm_buffers[i];
+            if (b->buffer && b->commit_seq < best) { best = b->commit_seq; oldest = i; }
+        }
+        if (oldest >= 0) {
+            shm_buffers[oldest].busy = 0;
+            idx = oldest;
+        }
+    }
+    if (idx < 0) {
+        if (!starve_start_ms) starve_start_ms = bell_now_ms();
+        return 0;
+    }
+    draw_buffer = idx;
+    g_framebuffer = shm_buffers[idx].data;
+    starve_start_ms = 0;
+    return 1;
+}
 
 static void shm_buffer_release(void *data, struct wl_buffer *wl_buffer) {
     (void)wl_buffer;
     ((ShmBuffer *)data)->busy = 0;
+    // The renderer may have been waiting for exactly this buffer.
+    if (!g_framebuffer) term_request_render();
 }
 
 static const struct wl_buffer_listener shm_buffer_listener = {
@@ -314,6 +381,55 @@ static int create_shm_file(int size) {
     return fd;
 }
 
+// Load the pointer image from the theme and publish it as a wl_buffer.
+// One static image is used (same behaviour as before, which took the first
+// image of the themed cursor). Returns 1 when the cursor is usable.
+static int load_pointer_cursor(const char *theme, int size) {
+    XCursorImage img;
+    if (!xcursor_load(theme, size, "left_ptr", &img) &&
+        !xcursor_load(theme, size, "default", &img)) {
+        return 0;
+    }
+    if (!wl_shm || img.w <= 0 || img.h <= 0) { xcursor_free(&img); return 0; }
+
+    cursor_map_size = (size_t)img.w * img.h * 4u;
+    cursor_fd = create_shm_file((int)cursor_map_size);
+    if (cursor_fd < 0) { xcursor_free(&img); return 0; }
+    cursor_map = mmap(NULL, cursor_map_size, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, cursor_fd, 0);
+    if (cursor_map == MAP_FAILED) {
+        cursor_map = NULL;
+        close(cursor_fd);
+        cursor_fd = -1;
+        xcursor_free(&img);
+        return 0;
+    }
+    memcpy(cursor_map, img.pixels, cursor_map_size);
+
+    struct wl_shm_pool *pool = wl_shm_create_pool(wl_shm, cursor_fd, (int)cursor_map_size);
+    if (pool) {
+        cursor_buffer = wl_shm_pool_create_buffer(pool, 0, img.w, img.h, img.w * 4,
+                                                  WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
+    }
+    if (!cursor_buffer) {
+        munmap(cursor_map, cursor_map_size);
+        cursor_map = NULL;
+        close(cursor_fd);
+        cursor_fd = -1;
+        cursor_map_size = 0;
+        xcursor_free(&img);
+        return 0;
+    }
+
+    cursor_w = img.w;
+    cursor_h = img.h;
+    cursor_hot_x = img.hot_x;
+    cursor_hot_y = img.hot_y;
+    xcursor_free(&img);
+    return 1;
+}
+
 static void destroy_shm_buffers(void) {
     for (int i = 0; i < WAYLAND_NUM_BUFFERS; i++) {
         if (shm_buffers[i].buffer) {
@@ -322,9 +438,13 @@ static void destroy_shm_buffers(void) {
         shm_buffers[i].buffer = NULL;
         shm_buffers[i].data = NULL;
         shm_buffers[i].busy = 0;
+        shm_buffers[i].commit_seq = 0;
     }
-    current_buffer = 0;
+    draw_buffer = -1;
+    starve_start_ms = 0;
     g_framebuffer = NULL;
+    // Any cached damage state for the old buffers is meaningless now.
+    render_forget_all_buffers();
 }
 
 // (Re)create the SHM pool and both scanout buffers for the current size.
@@ -372,15 +492,17 @@ static int create_shm_buffers(int width, int height) {
     }
     wl_shm_pool_destroy(pool);
 
-    current_buffer = 0;
-    g_framebuffer = shm_buffers[0].data;
+    draw_buffer = -1;
+    g_framebuffer = NULL;
+    starve_start_ms = 0;
+    arm_draw_buffer();
     return 0;
 }
 
 static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
     xdg_surface_ack_configure(xdg_surface, serial);
     
-    if (!shm_buffers[current_buffer].buffer) {
+    if (!shm_buffers[0].buffer) {
         create_shm_buffers(g_width, g_height);
     }
 }
@@ -394,9 +516,12 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel
         if (width != g_width || height != g_height) {
             g_width = width;
             g_height = height;
-            // Resize the buffer set first; the text grid follows. If the
-            // allocation fails, rendering stays paused (no framebuffer).
-            if (create_shm_buffers(g_width, g_height) == 0) {
+            if (wl_gl_active) {
+                // EGL owns the buffers now; just resync the text grid.
+                term_resize(g_width, g_height);
+            } else if (create_shm_buffers(g_width, g_height) == 0) {
+                // Resize the buffer set first; the text grid follows. If the
+                // allocation fails, rendering stays paused (no framebuffer).
                 term_resize(g_width, g_height);
             }
         }
@@ -556,6 +681,22 @@ static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t s
         wayland_get_clipboard();
         return;
     }
+    // Font zoom (Ctrl+Shift+=/-/0 and Ctrl+KP_Add/KP_Subtract)
+    if (ctrl && (shift || sym == XKB_KEY_KP_Add || sym == XKB_KEY_KP_Subtract)) {
+        if (sym == XKB_KEY_plus || sym == XKB_KEY_equal || sym == XKB_KEY_KP_Add) {
+            term_zoom(+1);
+            return;
+        }
+        if (sym == XKB_KEY_minus || sym == XKB_KEY_underscore || sym == XKB_KEY_KP_Subtract) {
+            term_zoom(-1);
+            return;
+        }
+        if (sym == XKB_KEY_0 || sym == XKB_KEY_KP_0 ||
+            sym == XKB_KEY_parenright) { // Shift+0 reports as ')'
+            term_zoom_reset();
+            return;
+        }
+    }
 
     if (sym == XKB_KEY_BackSpace) {
         buf[0] = '\x7f';
@@ -587,7 +728,6 @@ static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t s
 
     if (len > 0) {
         term_clear_selection();
-        sound_play_key();
         term_send_input(buf, len);
         key_repeat_start(buf, len);
     }
@@ -616,16 +756,15 @@ static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t seria
     last_ptr_y = surface_y;
     // Attach the themed default arrow so the cursor stays visible over the
     // window; fall back to the compositor default if no theme was loaded.
-    if (cursor_surface && cursor_left_ptr && cursor_left_ptr->image_count > 0) {
-        struct wl_cursor_image *img = cursor_left_ptr->images[0];
-        struct wl_buffer *img_buf = wl_cursor_image_get_buffer(img);
-        if (img_buf) {
-            wl_surface_attach(cursor_surface, img_buf, 0, 0);
-            wl_surface_damage(cursor_surface, 0, 0, img->width, img->height);
-            wl_surface_commit(cursor_surface);
-            wl_pointer_set_cursor(pointer, serial, cursor_surface, img->hotspot_x, img->hotspot_y);
-            return;
-        }
+    if (cursor_surface && cursor_buffer) {
+        wl_surface_attach(cursor_surface, cursor_buffer, 0, 0);
+        wl_surface_damage(cursor_surface, 0, 0,
+                          cursor_w / cursor_scale, cursor_h / cursor_scale);
+        wl_surface_commit(cursor_surface);
+        // Hotspots are surface-local: divide the pixel hotspot by the scale.
+        wl_pointer_set_cursor(pointer, serial, cursor_surface,
+                              cursor_hot_x / cursor_scale, cursor_hot_y / cursor_scale);
+        return;
     }
     wl_pointer_set_cursor(pointer, serial, NULL, 0, 0);
 }
@@ -634,12 +773,14 @@ static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t seria
 
 static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
     current_serial = serial;
-    int x = wl_fixed_to_int(last_ptr_x);
-    int y = wl_fixed_to_int(last_ptr_y);
+    // Surface coordinates are logical; the framebuffer is in output pixels.
+    int x = wl_fixed_to_int(last_ptr_x) * output_scale_factor;
+    int y = wl_fixed_to_int(last_ptr_y) * output_scale_factor;
     int pressed = (state == WL_POINTER_BUTTON_STATE_PRESSED);
     if (button == 272) { // Left click
         if (pressed) {
-            term_mouse_down(x, y);
+            if (xkb_state && wayland_mods() & 4) term_open_link(x, y); // Ctrl+click
+            else term_mouse_down(x, y);
         } else {
             term_mouse_up(x, y);
             term_copy();
@@ -653,16 +794,22 @@ static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t seri
 static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y) {
     last_ptr_x = surface_x;
     last_ptr_y = surface_y;
-    term_mouse_motion(wl_fixed_to_int(last_ptr_x), wl_fixed_to_int(last_ptr_y));
+    term_mouse_motion(wl_fixed_to_int(last_ptr_x) * output_scale_factor,
+                      wl_fixed_to_int(last_ptr_y) * output_scale_factor);
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis, wl_fixed_t value) {
-    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-        int v = wl_fixed_to_int(value);
-        int step = (g_config.mouse_scroll_step > 0) ? g_config.mouse_scroll_step : 3;
-        if (v < 0) term_scroll(step); // scroll up
-        else if (v > 0) term_scroll(-step); // scroll down
+    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) return;
+    int v = wl_fixed_to_int(value);
+    if (v == 0) return;
+    if (xkb_state && (wayland_mods() & 4)) {
+        // Ctrl+wheel zooms the font, like the key bindings.
+        term_zoom(v < 0 ? +1 : -1);
+        return;
     }
+    int step = (g_config.mouse_scroll_step > 0) ? g_config.mouse_scroll_step : 3;
+    if (v < 0) term_scroll(step); // scroll up
+    else term_scroll(-step); // scroll down
 }
 
 static const struct wl_pointer_listener pointer_listener = {
@@ -697,22 +844,52 @@ static void seat_name(void *data, struct wl_seat *seat, const char *name) {}
 static const struct wl_seat_listener seat_listener = { .capabilities = seat_capabilities, .name = seat_name };
 
 static void output_geometry(void *data, struct wl_output *wl_output, int32_t x, int32_t y, int32_t physical_width, int32_t physical_height, int32_t subpixel, const char *make, const char *model, int32_t transform) {}
-static int sized_from_output = 0;
+
+// Size the window to a whole number of cells (window_scale of the screen).
+static void compute_initial_size(void) {
+    if (screen_w <= 0 || screen_h <= 0) return;
+    float scale = g_config.window_scale;
+    if (scale <= 0.05f || scale > 1.0f) scale = 0.9f;
+    int cols = (int)(screen_w * scale - g_config.padding_left - g_config.padding_right) / g_cell_width;
+    int rows = (int)(screen_h * scale - g_config.padding_top - g_config.padding_bottom) / g_cell_height;
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    g_width = cols * g_cell_width + g_config.padding_left + g_config.padding_right;
+    g_height = rows * g_cell_height + g_config.padding_top + g_config.padding_bottom;
+}
+
 static void output_mode(void *data, struct wl_output *wl_output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
-    if ((flags & WL_OUTPUT_MODE_CURRENT) && !sized_from_output) {
-        sized_from_output = 1;
-        float scale = g_config.window_scale;
-        if (scale <= 0.05f || scale > 1.0f) scale = 0.9f;
-        int cols = (int)(width * scale - g_config.padding_left - g_config.padding_right) / g_cell_width;
-        int rows = (int)(height * scale - g_config.padding_top - g_config.padding_bottom) / g_cell_height;
-        if (cols < 1) cols = 1;
-        if (rows < 1) rows = 1;
-        g_width = cols * g_cell_width + g_config.padding_left + g_config.padding_right;
-        g_height = rows * g_cell_height + g_config.padding_top + g_config.padding_bottom;
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
+        screen_w = width;
+        screen_h = height;
     }
 }
 static void output_done(void *data, struct wl_output *wl_output) {}
-static void output_scale(void *data, struct wl_output *wl_output, int32_t factor) {}
+
+// HiDPI: the compositor tells us the output scale. Font metrics are scaled so
+// text keeps its physical size but renders at native resolution, and the
+// surface is told the buffer scale so logical coordinates stay unchanged.
+static void output_scale(void *data, struct wl_output *wl_output, int32_t factor) {
+    if (factor < 1) factor = 1;
+    if (factor == output_scale_factor) return;
+    output_scale_factor = factor;
+    if (compositor_version < 3) return; // no buffer-scale support: stay at 1x
+    if (!wayland_ready) return; // applied during init, before buffers exist
+    if (wl_surface && compositor_version >= 3)
+        wl_surface_set_buffer_scale(wl_surface, factor);
+    term_set_scale((float)factor);
+    int buffer_recreated = 0;
+#ifdef _HAS_GPU
+    if (wl_gl_active) {
+        extern void gpu_resize(int width, int height);
+        gpu_resize(g_width, g_height);
+        buffer_recreated = 1;
+    }
+#endif
+    if (!buffer_recreated && create_shm_buffers(g_width, g_height) == 0) {
+        term_resize(g_width, g_height);
+    }
+}
 static const struct wl_output_listener output_listener = {
     .geometry = output_geometry,
     .mode = output_mode,
@@ -765,25 +942,37 @@ static int wayland_init(const char *font_pattern) {
 
     if (!wl_compositor || !wl_shm || !xdg_wm_base) return -1;
 
+    // HiDPI: the output events (mode + scale) arrived in the roundtrips
+    // above. Scale the font metrics so the first buffers are created at the
+    // native pixel size, then size the window to whole cells.
+    if (output_scale_factor > 1 && compositor_version >= 3)
+        term_set_scale((float)output_scale_factor);
+    compute_initial_size();
+
     // Load the user's cursor theme (XDG env -> KDE/GTK config -> system
     // default) so the pointer matches their desktop. Must happen before the
     // surface is mapped: the pointer can enter it as soon as it exists.
     char theme_name[64];
     int cursor_size = 0;
-    const char *load_name = resolve_cursor_theme(theme_name, sizeof(theme_name), &cursor_size);
-    cursor_theme = wl_cursor_theme_load(load_name, cursor_size, wl_shm);
-    if (cursor_theme) {
-        cursor_left_ptr = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr");
-        if (!cursor_left_ptr && load_name) {
-            // Theme loaded but has no left_ptr — retry with the system default
-            wl_cursor_theme_destroy(cursor_theme);
-            cursor_theme = wl_cursor_theme_load(NULL, cursor_size, wl_shm);
-            cursor_left_ptr = cursor_theme ? wl_cursor_theme_get_cursor(cursor_theme, "left_ptr") : NULL;
-        }
+    const char *theme = resolve_cursor_theme(theme_name, sizeof(theme_name), &cursor_size);
+    // Load the pointer image at the output's pixel scale so it stays crisp
+    // and the same physical size on HiDPI displays.
+    int cursor_px = cursor_size * output_scale_factor;
+    if (!load_pointer_cursor(theme, cursor_px) && strcmp(theme, "default") != 0) {
+        // Configured theme unusable — fall back to the system default theme.
+        load_pointer_cursor("default", cursor_px); // no cursor if this fails too
     }
+    cursor_scale = output_scale_factor;
     cursor_surface = wl_compositor_create_surface(wl_compositor);
+    if (compositor_version >= 3 && cursor_scale > 1) {
+        wl_surface_set_buffer_scale(cursor_surface, cursor_scale);
+    }
 
     wl_surface = wl_compositor_create_surface(wl_compositor);
+    if (compositor_version >= 3 && output_scale_factor > 1) {
+        // Buffer pixels are scale× the logical surface coordinates.
+        wl_surface_set_buffer_scale(wl_surface, output_scale_factor);
+    }
     xdg_surface = xdg_wm_base_get_xdg_surface(xdg_wm_base, wl_surface);
     xdg_surface_add_listener(xdg_surface, &xdg_surface_listener, NULL);
 
@@ -808,6 +997,7 @@ static int wayland_init(const char *font_pattern) {
     wl_surface_commit(wl_surface);
     wl_display_roundtrip(wl_display); // Wait for configure
 
+    wayland_ready = 1; // live scale changes may now reconfigure the buffers
     return 0;
 }
 
@@ -824,7 +1014,9 @@ static void wayland_cleanup(void) {
     if (xdg_surface) xdg_surface_destroy(xdg_surface);
     if (cursor_surface) wl_surface_destroy(cursor_surface);
     if (wl_surface) wl_surface_destroy(wl_surface);
-    if (cursor_theme) wl_cursor_theme_destroy(cursor_theme);
+    if (cursor_buffer) wl_buffer_destroy(cursor_buffer);
+    if (cursor_map) munmap(cursor_map, cursor_map_size);
+    if (cursor_fd >= 0) close(cursor_fd);
     if (wl_keyboard) wl_keyboard_destroy(wl_keyboard);
     if (wl_pointer) wl_pointer_destroy(wl_pointer);
     if (wl_seat) wl_seat_destroy(wl_seat);
@@ -850,7 +1042,6 @@ static void wayland_handle_timer(void) {
         if (read(key_repeat_fd, &expirations, sizeof(expirations)) == sizeof(expirations)) {
             for (uint64_t i = 0; i < expirations; i++) {
                 term_clear_selection();
-                sound_play_key();
                 term_send_input(key_repeat_str, key_repeat_len);
             }
         }
@@ -866,31 +1057,65 @@ static void wayland_set_title(const char *title) {
 }
 
 static void wayland_flush(void) {
-    ShmBuffer *buf = &shm_buffers[current_buffer];
-    if (!buf->buffer) return;
+    if (wl_gl_active) return; // EGL presents via eglSwapBuffers
+    if (draw_buffer < 0) return; // no buffer was armed for this frame
+    ShmBuffer *buf = &shm_buffers[draw_buffer];
+    if (!buf->buffer || buf->busy) return;
+
     wl_surface_attach(wl_surface, buf->buffer, 0, 0);
-    if (compositor_version >= 4) {
-        wl_surface_damage_buffer(wl_surface, 0, 0, g_width, g_height);
-    } else {
-        // Older compositors: surface-local damage only (buffer damage is
-        // protocol version 4+)
-        wl_surface_damage(wl_surface, 0, 0, g_width, g_height);
+    // Only report what actually changed this frame (the renderer tracks it);
+    // a compositor re-reads less and the commit stays cheap.
+    int y0 = g_damage_y0, y1 = g_damage_y1;
+    if (y1 > y0) {
+        if (compositor_version >= 4) {
+            wl_surface_damage_buffer(wl_surface, 0, y0, g_width, y1 - y0);
+        } else {
+            // Older compositors: surface-local damage only (buffer damage is
+            // protocol version 4+)
+            wl_surface_damage(wl_surface, 0, y0, g_width, y1 - y0);
+        }
     }
     wl_surface_commit(wl_surface);
-    wl_display_flush(wl_display);
     buf->busy = 1;
+    buf->commit_seq = ++commit_seq;
+    wl_display_flush(wl_display);
 
-    // Hand the next frame the other buffer if the compositor has released
-    // it — writing while it scans out would tear. When both are still busy
-    // (slow compositor, burst of output) we keep the current buffer.
-    int next = 1 - current_buffer;
-    if (shm_buffers[next].buffer && !shm_buffers[next].busy) {
-        current_buffer = next;
-    }
-    g_framebuffer = shm_buffers[current_buffer].data;
+    // The next frame may only be drawn once the compositor releases a
+    // buffer. If neither is free yet the render simply waits; the release
+    // callback re-arms g_framebuffer and asks for a redraw.
+    draw_buffer = -1;
+    g_framebuffer = NULL;
+    arm_draw_buffer();
 }
 
 static int wayland_get_timer_fd(void) { return key_repeat_fd; }
+
+// Called by the main loop right before a frame is drawn: hand it a released
+// scanout buffer, or report that every buffer is still held. Also enforces
+// the starvation fallback so output cannot stall forever on a compositor
+// that fails to send release events.
+static int wayland_ready_to_draw(void) {
+    if (wl_gl_active) return 1;
+    return arm_draw_buffer();
+}
+
+static void *wayland_native_display(void) { return wl_display; }
+static void *wayland_native_window(void) { return wl_surface; }
+static int wayland_native_platform(void) { return 1; } // Wayland
+
+static void wayland_gl_begin(void) {
+    wl_gl_active = 1;
+    // The EGL swapchain replaces the SHM buffers — release them (and the
+    // pool mapping) so the GPU path doesn't pay for a CPU swapchain.
+    destroy_shm_buffers();
+    if (shm_fd >= 0) {
+        if (shm_data) munmap(shm_data, pool_size);
+        close(shm_fd);
+        shm_data = NULL;
+        shm_fd = -1;
+        pool_size = 0;
+    }
+}
 
 static WindowBackend _wayland_backend = {
     .init = wayland_init,
@@ -902,7 +1127,12 @@ static WindowBackend _wayland_backend = {
     .set_clipboard = wayland_set_clipboard,
     .get_clipboard = wayland_get_clipboard,
     .handle_timer = wayland_handle_timer,
-    .set_title = wayland_set_title
+    .set_title = wayland_set_title,
+    .get_native_display = wayland_native_display,
+    .get_native_window = wayland_native_window,
+    .get_native_platform = wayland_native_platform,
+    .gl_begin = wayland_gl_begin,
+    .ready_to_draw = wayland_ready_to_draw
 };
 
 WindowBackend* get_wayland_backend(void) {

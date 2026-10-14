@@ -59,9 +59,8 @@ typedef struct {
     int adjust_line_height;     // pixel deltas applied to the cell metrics
     int adjust_column_width;
     int adjust_baseline;
-    char key_sound[512];        // WAV path, "default" = synthesized click, empty = off
-    float key_sound_volume;     // 0.0 - 1.0
-    int key_sound_enabled;      // 0/1 master switch
+    int gpu;                    // 1 = try the EGL/GLES renderer (default), 0 = CPU only
+    int frame_rate;             // max presented frames per second (0 = unlimited)
 } TermConfig;
 
 extern TermConfig g_config;

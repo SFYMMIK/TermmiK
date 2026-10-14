@@ -22,6 +22,9 @@
 #include <stddef.h>
 #include <unistd.h>
 
+// TermmiK's mmap-backed allocator. Payloads are 16-byte aligned and every
+// entry point is thread-safe (a single lock guards the shared free list), so
+// it can serve future parser/renderer worker threads as-is.
 void *my_malloc(size_t size);
 void *my_calloc(size_t nmemb, size_t size);
 void *my_realloc(void *ptr, size_t size);

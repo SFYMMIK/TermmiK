@@ -39,6 +39,7 @@ static XShmSegmentInfo g_shminfo;
 static int g_shm_supported = 0;
 static Visual *g_visual;
 static int g_depth;
+static int x11_gl_active = 0;
 
 static char *x11_clipboard_text = NULL;
 static Atom atom_CLIPBOARD, atom_UTF8_STRING, atom_TARGETS;
@@ -66,6 +67,19 @@ static int x11_init(const char *font_pattern) {
     (void)font_pattern; // Fonts are handled by render.c
     g_dpy = XOpenDisplay(NULL);
     if (!g_dpy) return -1;
+
+    // HiDPI: X11 has no per-window scale, but toolkits announce the display
+    // density through Xft.dpi. Apply it as a scale factor before any cell
+    // metrics are used (window sizing / font rasterization happen below).
+    char *dpi_str = XGetDefault(g_dpy, "Xft", "dpi");
+    if (dpi_str) {
+        float dpi = (float)atof(dpi_str);
+        if (dpi >= 120.0f) {
+            float scale = dpi / 96.0f;
+            if (scale > 4.0f) scale = 4.0f;
+            term_set_scale(scale);
+        }
+    }
 
     int screen = DefaultScreen(g_dpy);
     Window root = RootWindow(g_dpy, screen);
@@ -139,6 +153,7 @@ static int x11_init(const char *font_pattern) {
 
 static void x11_destroy_buffer(void) {
     if (!g_ximage) return;
+    render_forget_all_buffers(); // cached frame state dies with the buffer
     if (g_shm_supported && g_ximage->data) {
         XShmDetach(g_dpy, &g_shminfo);
         XSync(g_dpy, False);
@@ -256,6 +271,18 @@ static int x11_poll_events(void) {
                 } else if (keysym == XK_V || keysym == XK_v) {
                     x11_get_clipboard();
                     continue;
+                } else if (keysym == XK_plus || keysym == XK_equal ||
+                           keysym == XK_KP_Add) {
+                    term_zoom(+1);
+                    continue;
+                } else if (keysym == XK_minus || keysym == XK_underscore ||
+                           keysym == XK_KP_Subtract) {
+                    term_zoom(-1);
+                    continue;
+                } else if (keysym == XK_0 || keysym == XK_KP_0 ||
+                           keysym == XK_parenright) { // Shift produces ')'
+                    term_zoom_reset();
+                    continue;
                 }
             }
 
@@ -283,7 +310,6 @@ static int x11_poll_events(void) {
 
             if (len > 0) {
                 term_clear_selection();
-                sound_play_key();
                 term_send_input(chars, len);
             }
         } else if (ev.type == FocusIn) {
@@ -299,21 +325,30 @@ static int x11_poll_events(void) {
                 // Reallocate a correctly sized buffer (works for SHM and
                 // the plain XImage fallback alike — previously the fallback
                 // kept the old allocation and rendering would write past it)
-                x11_destroy_buffer();
-                x11_create_buffer();
+                if (!x11_gl_active) {
+                    x11_destroy_buffer();
+                    x11_create_buffer();
+                }
                 term_resize(g_width, g_height);
             }
         } else if (ev.type == Expose) {
             if (ev.xexpose.count == 0) {
+                // The X server may have discarded window contents — force a
+                // full repaint instead of trusting the damage cache.
+                render_forget_all_buffers();
                 term_resize(g_width, g_height);
             }
         } else if (ev.type == ButtonPress) {
+            int ctrl_held = (ev.xbutton.state & ControlMask) != 0;
             if (ev.xbutton.button == 4) { // Scroll up
-                term_scroll((g_config.mouse_scroll_step > 0) ? g_config.mouse_scroll_step : 3);
+                if (ctrl_held) term_zoom(+1);
+                else term_scroll((g_config.mouse_scroll_step > 0) ? g_config.mouse_scroll_step : 3);
             } else if (ev.xbutton.button == 5) { // Scroll down
-                term_scroll(-((g_config.mouse_scroll_step > 0) ? g_config.mouse_scroll_step : 3));
+                if (ctrl_held) term_zoom(-1);
+                else term_scroll(-((g_config.mouse_scroll_step > 0) ? g_config.mouse_scroll_step : 3));
             } else if (ev.xbutton.button == 1) { // Left click
-                term_mouse_down(ev.xbutton.x, ev.xbutton.y);
+                if (ctrl_held) term_open_link(ev.xbutton.x, ev.xbutton.y);
+                else term_mouse_down(ev.xbutton.x, ev.xbutton.y);
             } else if (ev.xbutton.button == 2) { // Middle click
                 term_mouse_other(ev.xbutton.x, ev.xbutton.y, 1, 1);
             } else if (ev.xbutton.button == 3) { // Right click
@@ -399,12 +434,27 @@ static int x11_get_fd(void) {
 }
 
 static void x11_flush(void) {
+    if (x11_gl_active) return; // EGL owns presentation now
+    int y0 = g_damage_y0, y1 = g_damage_y1;
+    if (y1 <= y0) return;
     if (g_shm_supported) {
-        XShmPutImage(g_dpy, g_win, g_gc, g_ximage, 0, 0, 0, 0, g_width, g_height, False);
+        XShmPutImage(g_dpy, g_win, g_gc, g_ximage, 0, y0, 0, y0, g_width, y1 - y0, False);
     } else {
-        XPutImage(g_dpy, g_win, g_gc, g_ximage, 0, 0, 0, 0, g_width, g_height);
+        XPutImage(g_dpy, g_win, g_gc, g_ximage, 0, y0, 0, y0, g_width, y1 - y0);
     }
-    XFlush(g_dpy);
+    // The server reads the shared image asynchronously; make sure it finished
+    // before the next frame paints into the same memory. (Without this the
+    // server could copy a half-redrawn buffer — the X11 black-flash race.)
+    XSync(g_dpy, False);
+}
+
+static void *x11_native_display(void) { return g_dpy; }
+static void *x11_native_window(void) { return (void *)(uintptr_t)g_win; }
+static int x11_native_platform(void) { return 2; } // X11
+
+static void x11_gl_begin(void) {
+    x11_gl_active = 1;
+    x11_destroy_buffer();
 }
 
 static WindowBackend _x11_backend = {
@@ -417,7 +467,11 @@ static WindowBackend _x11_backend = {
     .set_clipboard = x11_set_clipboard,
     .get_clipboard = x11_get_clipboard,
     .handle_timer = NULL,
-    .set_title = x11_set_title
+    .set_title = x11_set_title,
+    .get_native_display = x11_native_display,
+    .get_native_window = x11_native_window,
+    .get_native_platform = x11_native_platform,
+    .gl_begin = x11_gl_begin
 };
 
 WindowBackend* get_x11_backend(void) {

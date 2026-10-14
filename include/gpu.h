@@ -16,13 +16,21 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef SOUND_H
-#define SOUND_H
+#ifndef GPU_H
+#define GPU_H
 
-// Key sound effects (ALSA). All functions are safe no-ops when the sound
-// feature is disabled at build time (DISABLE_SOUND) or misconfigured.
-void sound_init(void);      // load the configured sample, open the device
-void sound_play_key(void);  // play the key sound (call on user keypress)
-void sound_cleanup(void);
+#include "vt_parser.h"
+
+// EGL/GLES2 renderer. gpu_init() returns 0 when a context was created and the
+// GPU path is active; any failure leaves the CPU renderer in charge.
+int  gpu_init(void);
+void gpu_cleanup(void);
+void gpu_resize(int width, int height);
+void gpu_draw(VTState *state);
+void gpu_present(void);
+void gpu_pump(void);
+void term_request_render(void);
+
+extern int g_use_gpu;
 
 #endif

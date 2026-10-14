@@ -40,17 +40,10 @@ override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter \
                    $(NATIVE_FLAGS) $(EXTRA_CFLAGS)
 override LDFLAGS += -flto=auto -Wl,--gc-sections $(EXTRA_LDFLAGS)
 
-LDLIBS = -lm -lfontconfig
+LDLIBS = -lm -lpthread
 STRIP ?= strip
 
-SRCS = src/main.c src/pty.c src/vt_parser.c src/render.c src/alloc.c src/config.c
-
-ifndef DISABLE_SOUND
-    LDLIBS += -lasound
-else
-    override CFLAGS += -DDISABLE_SOUND
-endif
-SRCS += src/sound.c
+SRCS = src/main.c src/pty.c src/vt_parser.c src/render.c src/alloc.c src/config.c src/font_list.c
 
 ifndef DISABLE_X11
     override CFLAGS += -D_HAS_X11
@@ -60,8 +53,19 @@ endif
 
 ifndef DISABLE_WAYLAND
     override CFLAGS += -D_HAS_WAYLAND
-    LDLIBS += -lwayland-client -lwayland-cursor -lxkbcommon
-    SRCS += src/wayland_backend.c src/xdg-shell-protocol.c src/xdg-decoration-protocol.c
+    LDLIBS += -lwayland-client -lxkbcommon
+    SRCS += src/wayland_backend.c src/xcursor.c src/xdg-shell-protocol.c src/xdg-decoration-protocol.c
+endif
+
+# GPU (EGL/GLES2) renderer — falls back to the CPU renderer at runtime if the
+# driver or display cannot provide a context.
+ifndef DISABLE_GPU
+    override CFLAGS += -D_HAS_GPU
+    LDLIBS += -lEGL -lGLESv2
+    ifndef DISABLE_WAYLAND
+        LDLIBS += -lwayland-egl
+    endif
+    SRCS += src/gpu.c
 endif
 
 OBJS = $(patsubst src/%.c,build/%.o,$(SRCS))
